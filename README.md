@@ -5,6 +5,7 @@ Comprehensive documentation, examples, and comparison guides for Harness CI/CD p
 ## 📚 Contents
 
 ### Documentation
+- **[HARNESS_VS_JENKINS_COMPARISON.md](./HARNESS_VS_JENKINS_COMPARISON.md)** - ⭐ **Comprehensive comparison: Harness vs Jenkins** (Detailed analysis)
 - **[HARNESS_CI_SETUP.md](./HARNESS_CI_SETUP.md)** - Complete guide for setting up Harness CI
 - **[HARNESS_CD_SETUP.md](./HARNESS_CD_SETUP.md)** - Complete guide for setting up Harness CD
 - **[HARNESS_BENEFITS_COMPARISON.md](./HARNESS_BENEFITS_COMPARISON.md)** - Detailed comparison with other CI/CD tools
@@ -38,8 +39,22 @@ Comprehensive documentation, examples, and comparison guides for Harness CI/CD p
 
 ## 📊 Comparison with Other Tools
 
-See [HARNESS_BENEFITS_COMPARISON.md](./HARNESS_BENEFITS_COMPARISON.md) for detailed comparisons:
-- Harness vs. Jenkins
+### Major Comparison
+- **[HARNESS_VS_JENKINS_COMPARISON.md](./HARNESS_VS_JENKINS_COMPARISON.md)** - ⭐ **Comprehensive 13-section comparison** covering:
+  - Architecture & Deployment
+  - Setup & Configuration
+  - CI/CD Capabilities
+  - Advanced Features (AI, Test Intelligence)
+  - Security & Compliance
+  - Cost Analysis (3-Year TCO)
+  - Performance & Scalability
+  - Developer Experience
+  - Maintenance & Operations
+  - Use Cases & Recommendations
+  - Migration Path
+
+### Other Comparisons
+See [HARNESS_BENEFITS_COMPARISON.md](./HARNESS_BENEFITS_COMPARISON.md) for comparisons with:
 - Harness vs. GitLab CI/CD
 - Harness vs. GitHub Actions
 - Harness vs. CircleCI
