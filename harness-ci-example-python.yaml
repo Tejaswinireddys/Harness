@@ -1,0 +1,110 @@
+# Harness CI Pipeline Example - Python Application
+# This is a sample configuration for a Python application
+
+pipeline:
+  name: Python CI Pipeline
+  identifier: python_ci_pipeline
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: YOUR_GIT_CONNECTOR  # Replace with your Git connector
+        repoName: YOUR_REPO_NAME          # Replace with your repository name
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Test
+        identifier: Build_and_Test
+        type: CI
+        spec:
+          cloneCodebase: true
+          execution:
+            steps:
+              # Step 1: Set up Python Environment
+              - step:
+                  type: Run
+                  name: Setup Python
+                  identifier: Setup_Python
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Setting up Python environment..."
+                      python --version
+                      pip --version
+                    image: python:3.11-slim
+              
+              # Step 2: Install Dependencies
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: Install_Dependencies
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Installing dependencies..."
+                      pip install --upgrade pip
+                      pip install -r requirements.txt
+                    image: python:3.11-slim
+              
+              # Step 3: Run Linting (Optional - using flake8)
+              - step:
+                  type: Run
+                  name: Lint Code
+                  identifier: Lint_Code
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Running linter..."
+                      pip install flake8
+                      flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || echo "Linting skipped"
+                    image: python:3.11-slim
+              
+              # Step 4: Run Tests
+              - step:
+                  type: Run
+                  name: Run Tests
+                  identifier: Run_Tests
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Running tests..."
+                      pytest --cov=. --cov-report=xml --cov-report=html
+                    image: python:3.11-slim
+              
+              # Step 5: Security Scan (Optional)
+              - step:
+                  type: Run
+                  name: Security Scan
+                  identifier: Security_Scan
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Running security scan..."
+                      pip install safety
+                      safety check || echo "Security scan completed"
+                    image: python:3.11-slim
+              
+              # Step 6: Build Docker Image (Optional)
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: Build Docker Image
+                  identifier: Build_Docker_Image
+                  spec:
+                    connectorRef: YOUR_DOCKER_CONNECTOR  # Replace with Docker connector
+                    repo: YOUR_DOCKER_REPO              # Replace with Docker repository
+                    tags:
+                      - <+pipeline.sequenceId>
+                      - latest
+                    dockerfile: Dockerfile
+                    context: .
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: YOUR_K8S_CONNECTOR  # Replace with Kubernetes connector
+              namespace: harness-delegate
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+

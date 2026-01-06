@@ -1,0 +1,210 @@
+# Harness CD Pipeline Example - Kubernetes Deployment
+# This is a sample configuration for deploying to Kubernetes
+
+pipeline:
+  name: Kubernetes CD Pipeline
+  identifier: k8s_cd_pipeline
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: YOUR_GIT_CONNECTOR  # Replace with your Git connector
+        repoName: YOUR_REPO_NAME          # Replace with your repository name
+        build: <+input>
+  stages:
+    # Stage 1: Deploy to Staging
+    - stage:
+        name: Deploy to Staging
+        identifier: Deploy_to_Staging
+        type: Deployment
+        spec:
+          serviceConfig:
+            serviceRef: my-service
+            serviceDefinition:
+              type: Kubernetes
+              spec:
+                artifacts:
+                  primary:
+                    type: DockerRegistry
+                    spec:
+                      connectorRef: YOUR_DOCKER_CONNECTOR  # Replace with Docker connector
+                      imagePath: myapp
+                      tag: <+pipeline.sequenceId>
+                manifests:
+                  - manifest:
+                      identifier: k8s-manifest
+                      type: K8sManifest
+                      spec:
+                        store:
+                          type: Github
+                          spec:
+                            connectorRef: YOUR_GIT_CONNECTOR
+                            gitFetchType: Branch
+                            paths:
+                              - k8s/manifests/
+                            repoName: YOUR_REPO_NAME
+                            branch: main
+          infrastructure:
+            environmentRef: staging
+            infrastructureDefinition:
+              type: KubernetesDirect
+              spec:
+                connectorRef: YOUR_K8S_CONNECTOR  # Replace with Kubernetes connector
+                namespace: staging
+                releaseName: release-<+INFRA_KEY>
+          execution:
+            steps:
+              # Step 1: Rolling Deployment
+              - step:
+                  type: K8sRollingDeploy
+                  name: Rolling Deployment
+                  identifier: Rolling_Deployment
+                  spec:
+                    skipDryRun: false
+                    skipSteadyStateCheck: false
+              
+              # Step 2: Verify Deployment
+              - step:
+                  type: Verify
+                  name: Verify Deployment
+                  identifier: Verify_Deployment
+                  spec:
+                    type: Prometheus
+                    spec:
+                      connectorRef: YOUR_PROMETHEUS_CONNECTOR  # Replace with Prometheus connector
+                      metricName: http_requests_total
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: sum(rate(http_requests_total[5m]))
+                      threshold:
+                        type: Absolute
+                        spec:
+                          value: 100
+            rollbackSteps:
+              - step:
+                  type: K8sRollingRollback
+                  name: Rolling Rollback
+                  identifier: Rolling_Rollback
+                  spec:
+                    skipDryRun: false
+    
+    # Stage 2: Approval Gate (Optional)
+    - stage:
+        name: Production Approval
+        identifier: Production_Approval
+        type: Approval
+        spec:
+          approvalType: Manual
+          approvers:
+            minimumCount: 1
+            disallowPipelineExecutor: false
+            userGroups:
+              - account.administrators
+          approvalMessage: "Approve deployment to production?"
+    
+    # Stage 3: Deploy to Production (Blue-Green)
+    - stage:
+        name: Deploy to Production
+        identifier: Deploy_to_Production
+        type: Deployment
+        spec:
+          serviceConfig:
+            serviceRef: my-service
+            serviceDefinition:
+              type: Kubernetes
+              spec:
+                artifacts:
+                  primary:
+                    type: DockerRegistry
+                    spec:
+                      connectorRef: YOUR_DOCKER_CONNECTOR
+                      imagePath: myapp
+                      tag: <+pipeline.sequenceId>
+                manifests:
+                  - manifest:
+                      identifier: k8s-manifest
+                      type: K8sManifest
+                      spec:
+                        store:
+                          type: Github
+                          spec:
+                            connectorRef: YOUR_GIT_CONNECTOR
+                            gitFetchType: Branch
+                            paths:
+                              - k8s/manifests/
+                            repoName: YOUR_REPO_NAME
+                            branch: main
+          infrastructure:
+            environmentRef: production
+            infrastructureDefinition:
+              type: KubernetesDirect
+              spec:
+                connectorRef: YOUR_K8S_CONNECTOR
+                namespace: production
+                releaseName: release-<+INFRA_KEY>
+          execution:
+            steps:
+              # Step 1: Blue-Green Deployment
+              - step:
+                  type: K8sBlueGreenDeploy
+                  name: Blue Green Deploy
+                  identifier: Blue_Green_Deploy
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+              
+              # Step 2: Verify Blue Environment
+              - step:
+                  type: Verify
+                  name: Verify Blue Environment
+                  identifier: Verify_Blue_Environment
+                  spec:
+                    type: Prometheus
+                    spec:
+                      connectorRef: YOUR_PROMETHEUS_CONNECTOR
+                      metricName: error_rate
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: sum(rate(http_requests_total{status=~"5.."}[5m]))
+                      threshold:
+                        type: Absolute
+                        spec:
+                          value: 10
+                    duration: 10m
+              
+              # Step 3: Swap Services (Switch to Blue)
+              - step:
+                  type: K8sBlueGreenSwapServices
+                  name: Swap Services
+                  identifier: Swap_Services
+                  spec:
+                    skipDryRun: false
+              
+              # Step 4: Continuous Verification
+              - step:
+                  type: Verify
+                  name: Continuous Verification
+                  identifier: Continuous_Verification
+                  spec:
+                    type: Datadog
+                    spec:
+                      connectorRef: YOUR_DATADOG_CONNECTOR  # Replace with Datadog connector
+                      metricName: request.error_rate
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: avg:request.error_rate{*}
+                      threshold:
+                        type: Percentage
+                        spec:
+                          value: 5
+                    duration: 30m
+            rollbackSteps:
+              - step:
+                  type: K8sBlueGreenRollback
+                  name: Blue Green Rollback
+                  identifier: Blue_Green_Rollback
+                  spec:
+                    skipDryRun: false
+

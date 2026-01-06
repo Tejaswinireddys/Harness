@@ -1,0 +1,199 @@
+# Harness CD Pipeline Example - Canary Deployment
+# This demonstrates a canary deployment strategy with gradual rollout
+
+pipeline:
+  name: Canary Deployment Pipeline
+  identifier: canary_deployment_pipeline
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: YOUR_GIT_CONNECTOR
+        repoName: YOUR_REPO_NAME
+        build: <+input>
+  stages:
+    - stage:
+        name: Canary Deployment
+        identifier: Canary_Deployment
+        type: Deployment
+        spec:
+          serviceConfig:
+            serviceRef: my-service
+            serviceDefinition:
+              type: Kubernetes
+              spec:
+                artifacts:
+                  primary:
+                    type: DockerRegistry
+                    spec:
+                      connectorRef: YOUR_DOCKER_CONNECTOR
+                      imagePath: myapp
+                      tag: <+pipeline.sequenceId>
+                manifests:
+                  - manifest:
+                      identifier: k8s-manifest
+                      type: K8sManifest
+                      spec:
+                        store:
+                          type: Github
+                          spec:
+                            connectorRef: YOUR_GIT_CONNECTOR
+                            gitFetchType: Branch
+                            paths:
+                              - k8s/manifests/
+                            repoName: YOUR_REPO_NAME
+                            branch: main
+          infrastructure:
+            environmentRef: production
+            infrastructureDefinition:
+              type: KubernetesDirect
+              spec:
+                connectorRef: YOUR_K8S_CONNECTOR
+                namespace: production
+                releaseName: release-<+INFRA_KEY>
+          execution:
+            steps:
+              # Step 1: Canary Deployment (10% traffic)
+              - step:
+                  type: K8sCanaryDeploy
+                  name: Canary Deploy 10%
+                  identifier: Canary_Deploy_10
+                  spec:
+                    instanceSelection:
+                      type: Count
+                      spec:
+                        count: 1
+                    skipDryRun: false
+              
+              # Step 2: Verify Canary (10%)
+              - step:
+                  type: Verify
+                  name: Verify Canary 10%
+                  identifier: Verify_Canary_10
+                  spec:
+                    type: Prometheus
+                    spec:
+                      connectorRef: YOUR_PROMETHEUS_CONNECTOR
+                      metricName: error_rate
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: sum(rate(http_requests_total{status=~"5.."}[5m]))
+                      threshold:
+                        type: Absolute
+                        spec:
+                          value: 5
+                    duration: 5m
+              
+              # Step 3: Canary Deployment (25% traffic)
+              - step:
+                  type: K8sCanaryDeploy
+                  name: Canary Deploy 25%
+                  identifier: Canary_Deploy_25
+                  spec:
+                    instanceSelection:
+                      type: Count
+                      spec:
+                        count: 2
+                    skipDryRun: false
+              
+              # Step 4: Verify Canary (25%)
+              - step:
+                  type: Verify
+                  name: Verify Canary 25%
+                  identifier: Verify_Canary_25
+                  spec:
+                    type: Datadog
+                    spec:
+                      connectorRef: YOUR_DATADOG_CONNECTOR
+                      metricName: request.error_rate
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: avg:request.error_rate{*}
+                      threshold:
+                        type: Percentage
+                        spec:
+                          value: 3
+                    duration: 5m
+              
+              # Step 5: Canary Deployment (50% traffic)
+              - step:
+                  type: K8sCanaryDeploy
+                  name: Canary Deploy 50%
+                  identifier: Canary_Deploy_50
+                  spec:
+                    instanceSelection:
+                      type: Count
+                      spec:
+                        count: 3
+                    skipDryRun: false
+              
+              # Step 6: Verify Canary (50%)
+              - step:
+                  type: Verify
+                  name: Verify Canary 50%
+                  identifier: Verify_Canary_50
+                  spec:
+                    type: Prometheus
+                    spec:
+                      connectorRef: YOUR_PROMETHEUS_CONNECTOR
+                      metricName: response_time
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+                      threshold:
+                        type: Absolute
+                        spec:
+                          value: 500
+                    duration: 10m
+              
+              # Step 7: Delete Canary (if verification passes)
+              - step:
+                  type: K8sCanaryDelete
+                  name: Delete Canary
+                  identifier: Delete_Canary
+                  spec:
+                    skipDryRun: false
+              
+              # Step 8: Full Rolling Deployment
+              - step:
+                  type: K8sRollingDeploy
+                  name: Full Deployment
+                  identifier: Full_Deployment
+                  spec:
+                    skipDryRun: false
+                    skipSteadyStateCheck: false
+              
+              # Step 9: Final Verification
+              - step:
+                  type: Verify
+                  name: Final Verification
+                  identifier: Final_Verification
+                  spec:
+                    type: Prometheus
+                    spec:
+                      connectorRef: YOUR_PROMETHEUS_CONNECTOR
+                      metricName: http_requests_total
+                      baseline: <+serviceConfig.artifacts.primary.tag>
+                      canary: <+serviceConfig.artifacts.primary.tag>
+                      query: sum(rate(http_requests_total[5m]))
+                      threshold:
+                        type: Absolute
+                        spec:
+                          value: 100
+                    duration: 15m
+            rollbackSteps:
+              - step:
+                  type: K8sCanaryDelete
+                  name: Delete Canary on Rollback
+                  identifier: Delete_Canary_Rollback
+                  spec:
+                    skipDryRun: false
+              - step:
+                  type: K8sRollingRollback
+                  name: Rolling Rollback
+                  identifier: Rolling_Rollback
+                  spec:
+                    skipDryRun: false
+

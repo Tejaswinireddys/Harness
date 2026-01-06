@@ -1,0 +1,116 @@
+# Harness CI Pipeline Example - Java/Maven Application
+# This is a sample configuration for a Java application using Maven
+
+pipeline:
+  name: Java CI Pipeline
+  identifier: java_ci_pipeline
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: YOUR_GIT_CONNECTOR  # Replace with your Git connector
+        repoName: YOUR_REPO_NAME          # Replace with your repository name
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Test
+        identifier: Build_and_Test
+        type: CI
+        spec:
+          cloneCodebase: true
+          execution:
+            steps:
+              # Step 1: Cache Maven Dependencies (Optional - for faster builds)
+              - step:
+                  type: Cache
+                  name: Cache Maven Dependencies
+                  identifier: Cache_Maven_Dependencies
+                  spec:
+                    key: maven-{{ checksum "pom.xml" }}
+                    paths:
+                      - /root/.m2
+                    archiveFormat: Tar
+              
+              # Step 2: Build Application
+              - step:
+                  type: Run
+                  name: Build with Maven
+                  identifier: Build_with_Maven
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Building application with Maven..."
+                      mvn clean compile
+                    image: maven:3.9-eclipse-temurin-17
+              
+              # Step 3: Run Tests
+              - step:
+                  type: Run
+                  name: Run Tests
+                  identifier: Run_Tests
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Running tests..."
+                      mvn test
+                    image: maven:3.9-eclipse-temurin-17
+              
+              # Step 4: Package Application
+              - step:
+                  type: Run
+                  name: Package Application
+                  identifier: Package_Application
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Packaging application..."
+                      mvn package -DskipTests
+                    image: maven:3.9-eclipse-temurin-17
+              
+              # Step 5: Code Coverage (Optional)
+              - step:
+                  type: Run
+                  name: Generate Coverage Report
+                  identifier: Generate_Coverage_Report
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Generating coverage report..."
+                      mvn jacoco:report || echo "Coverage report generation skipped"
+                    image: maven:3.9-eclipse-temurin-17
+              
+              # Step 6: Publish Artifacts
+              - step:
+                  type: ArtifactoryUpload
+                  name: Publish Artifacts
+                  identifier: Publish_Artifacts
+                  spec:
+                    connectorRef: YOUR_ARTIFACTORY_CONNECTOR  # Replace with Artifactory connector
+                    repository: YOUR_REPO_NAME
+                    targetPath: artifacts
+                    sourcePath: target/*.jar
+              
+              # Step 7: Build Docker Image (Optional)
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: Build Docker Image
+                  identifier: Build_Docker_Image
+                  spec:
+                    connectorRef: YOUR_DOCKER_CONNECTOR  # Replace with Docker connector
+                    repo: YOUR_DOCKER_REPO              # Replace with Docker repository
+                    tags:
+                      - <+pipeline.sequenceId>
+                      - latest
+                    dockerfile: Dockerfile
+                    context: .
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: YOUR_K8S_CONNECTOR  # Replace with Kubernetes connector
+              namespace: harness-delegate
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+

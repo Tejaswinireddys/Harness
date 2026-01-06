@@ -1,0 +1,105 @@
+# Harness CI Pipeline Example - Node.js/React Application
+# This is a sample configuration for a Node.js application
+
+pipeline:
+  name: Node.js CI Pipeline
+  identifier: nodejs_ci_pipeline
+  projectIdentifier: default_project
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: YOUR_GIT_CONNECTOR  # Replace with your Git connector
+        repoName: YOUR_REPO_NAME          # Replace with your repository name
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Test
+        identifier: Build_and_Test
+        type: CI
+        spec:
+          cloneCodebase: true
+          execution:
+            steps:
+              # Step 1: Install Dependencies
+              - step:
+                  type: Run
+                  name: Install Dependencies
+                  identifier: Install_Dependencies
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Installing dependencies..."
+                      npm ci
+                    image: node:18-alpine
+              
+              # Step 2: Run Linting (Optional)
+              - step:
+                  type: Run
+                  name: Lint Code
+                  identifier: Lint_Code
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Running linter..."
+                      npm run lint || echo "Linting skipped if not configured"
+                    image: node:18-alpine
+              
+              # Step 3: Build Application
+              - step:
+                  type: Run
+                  name: Build Application
+                  identifier: Build_Application
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Building application..."
+                      npm run build
+                    image: node:18-alpine
+              
+              # Step 4: Run Tests
+              - step:
+                  type: Run
+                  name: Run Tests
+                  identifier: Run_Tests
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Running tests..."
+                      npm test -- --coverage
+                    image: node:18-alpine
+              
+              # Step 5: Publish Test Results (Optional)
+              - step:
+                  type: Run
+                  name: Publish Test Results
+                  identifier: Publish_Test_Results
+                  spec:
+                    shell: Sh
+                    command: |
+                      echo "Test results published"
+                    image: node:18-alpine
+              
+              # Step 6: Build Docker Image (Optional)
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: Build Docker Image
+                  identifier: Build_Docker_Image
+                  spec:
+                    connectorRef: YOUR_DOCKER_CONNECTOR  # Replace with Docker connector
+                    repo: YOUR_DOCKER_REPO              # Replace with Docker repository
+                    tags:
+                      - <+pipeline.sequenceId>
+                      - latest
+                    dockerfile: Dockerfile
+                    context: .
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: YOUR_K8S_CONNECTOR  # Replace with Kubernetes connector
+              namespace: harness-delegate
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
+
