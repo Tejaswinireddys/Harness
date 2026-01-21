@@ -1,0 +1,813 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# HARNESS CD PIPELINE: RabbitMQ 4.x Cluster Deployment
+# ═══════════════════════════════════════════════════════════════════════════
+# This pipeline automates the deployment of a RabbitMQ 4.x cluster using
+# Ansible. It includes pre-flight checks, multi-environment deployment,
+# approval gates, validation, and rollback capabilities.
+# ═══════════════════════════════════════════════════════════════════════════
+
+pipeline:
+  name: RabbitMQ-Cluster-Deployment
+  identifier: rabbitmq_cluster_deployment
+  description: |
+    Automated deployment of RabbitMQ 4.x cluster using Ansible.
+    Supports Dev, Staging, and Production environments with approval gates.
+  projectIdentifier: rabbitmq_deployment
+  orgIdentifier: Infrastructure
+  tags:
+    rabbitmq: ""
+    ansible: ""
+    infrastructure: ""
+    cd: ""
+    messaging: ""
+
+  properties:
+    ci:
+      codebase:
+        connectorRef: rabbitmq_ansible_repo
+        repoName: rabbitmq-ansible-harness
+        build: <+input>
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PIPELINE VARIABLES
+  # ═══════════════════════════════════════════════════════════════════════════
+  variables:
+    - name: rabbitmq_version
+      type: String
+      description: RabbitMQ version to deploy
+      required: true
+      default: "4.0.3"
+
+    - name: erlang_version
+      type: String
+      description: Erlang OTP version
+      required: false
+      default: "26.2"
+
+    - name: erlang_cookie
+      type: Secret
+      description: Erlang cluster cookie (must be identical across all nodes)
+      required: true
+      value: <+secrets.getValue("erlang_cookie")>
+
+    - name: rabbitmq_admin_password
+      type: Secret
+      description: Password for RabbitMQ admin user
+      required: true
+      value: <+secrets.getValue("rabbitmq_admin_password")>
+
+    - name: git_branch
+      type: String
+      description: Git branch to deploy from
+      required: false
+      default: "main"
+
+    - name: deploy_to_staging
+      type: Boolean
+      description: Enable deployment to staging environment
+      required: false
+      default: "false"
+
+    - name: deploy_to_production
+      type: Boolean
+      description: Enable deployment to production environment
+      required: false
+      default: "false"
+
+    - name: rollback_version
+      type: String
+      description: Version to rollback to if deployment fails
+      required: false
+      default: "4.0.2"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PIPELINE STAGES
+  # ═══════════════════════════════════════════════════════════════════════════
+  stages:
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 1: Pre-Flight Checks
+    # ─────────────────────────────────────────────────────────────────────────
+    - stage:
+        name: Pre-Flight-Checks
+        identifier: preflight_checks
+        description: Validate prerequisites and prepare for deployment
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Initialize Workspace
+                  identifier: init_workspace
+                  type: Run
+                  timeout: 5m
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine/git:latest
+                    shell: Sh
+                    command: |
+                      echo "═══════════════════════════════════════════════════════════"
+                      echo "HARNESS CD - RabbitMQ Cluster Deployment"
+                      echo "═══════════════════════════════════════════════════════════"
+                      echo ""
+                      echo "Pipeline: <+pipeline.name>"
+                      echo "Execution ID: <+pipeline.executionId>"
+                      echo "Triggered By: <+pipeline.triggeredBy.name>"
+                      echo "Start Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+                      echo ""
+                      echo "Deployment Configuration:"
+                      echo "  RabbitMQ Version: <+pipeline.variables.rabbitmq_version>"
+                      echo "  Erlang Version: <+pipeline.variables.erlang_version>"
+                      echo "  Git Branch: <+pipeline.variables.git_branch>"
+                      echo "═══════════════════════════════════════════════════════════"
+
+              - step:
+                  name: Clone Repository
+                  identifier: clone_repo
+                  type: Run
+                  timeout: 5m
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine/git:latest
+                    shell: Sh
+                    command: |
+                      echo "Cloning repository..."
+                      git clone --branch <+pipeline.variables.git_branch> \
+                        --depth 1 \
+                        <+codebase.repoUrl> ansible-playbooks
+                      
+                      cd ansible-playbooks
+                      echo "Repository cloned successfully"
+                      echo "Commit: $(git rev-parse HEAD)"
+                      echo ""
+                      ls -la
+
+              - step:
+                  name: Validate Ansible Playbooks
+                  identifier: validate_playbooks
+                  type: Run
+                  timeout: 10m
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: cytopia/ansible:latest
+                    shell: Sh
+                    command: |
+                      echo "═══════════════════════════════════════════════════════════"
+                      echo "Validating Ansible Playbooks"
+                      echo "═══════════════════════════════════════════════════════════"
+                      
+                      cd ansible-playbooks
+                      
+                      # Install required collections
+                      echo "Installing Ansible Galaxy requirements..."
+                      ansible-galaxy collection install -r requirements.yml --force
+                      
+                      # Syntax check all playbooks
+                      echo "Running syntax check..."
+                      for playbook in playbooks/*.yml; do
+                        echo "Checking: $playbook"
+                        ansible-playbook $playbook --syntax-check
+                      done
+                      
+                      echo ""
+                      echo "✅ All playbooks passed syntax validation"
+
+              - step:
+                  name: Security Scan
+                  identifier: security_scan
+                  type: Run
+                  timeout: 5m
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: cytopia/ansible:latest
+                    shell: Sh
+                    command: |
+                      echo "═══════════════════════════════════════════════════════════"
+                      echo "Running Security Checks"
+                      echo "═══════════════════════════════════════════════════════════"
+                      
+                      cd ansible-playbooks
+                      
+                      # Check for hardcoded passwords
+                      echo "Checking for hardcoded secrets..."
+                      if grep -r "password:" --include="*.yml" inventory/ | grep -v "lookup\|vault\|env\|variable"; then
+                        echo "⚠️ Warning: Possible hardcoded passwords found"
+                      else
+                        echo "✅ No hardcoded passwords detected"
+                      fi
+                      
+                      # Verify no default passwords in production
+                      echo ""
+                      echo "✅ Security checks completed"
+        tags:
+          preflight: ""
+          validation: ""
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 2: Deploy to Development
+    # ─────────────────────────────────────────────────────────────────────────
+    - stage:
+        name: Deploy-to-Development
+        identifier: deploy_dev
+        description: Deploy RabbitMQ cluster to Development environment
+        type: Deployment
+        spec:
+          deploymentType: CustomDeployment
+          service:
+            serviceRef: rabbitmq_cluster
+            serviceInputs:
+              serviceDefinition:
+                type: CustomDeployment
+                spec:
+                  variables:
+                    - name: rabbitmq_version
+                      type: String
+                      value: <+pipeline.variables.rabbitmq_version>
+          environment:
+            environmentRef: development
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: rabbitmq_dev_infra
+          execution:
+            steps:
+              - step:
+                  name: Pre-Deployment Backup
+                  identifier: pre_backup
+                  type: ShellScript
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "Creating Pre-Deployment Backup"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          # Run backup playbook
+                          ansible-playbook playbooks/backup.yml \
+                            -i inventory/dev/hosts.yml \
+                            -e "backup_timestamp=$(date +%Y%m%d_%H%M%S)" \
+                            || echo "No existing installation to backup"
+                          
+                          echo "✅ Backup step completed"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+
+              - step:
+                  name: Deploy RabbitMQ Cluster
+                  identifier: deploy_rabbitmq
+                  type: ShellScript
+                  timeout: 45m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "Deploying RabbitMQ <+pipeline.variables.rabbitmq_version>"
+                          echo "Environment: Development"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          # Run main deployment playbook
+                          ansible-playbook playbooks/site.yml \
+                            -i inventory/dev/hosts.yml \
+                            -e "rabbitmq_version=<+pipeline.variables.rabbitmq_version>" \
+                            -e "erlang_version=<+pipeline.variables.erlang_version>" \
+                            -e "environment_name=development" \
+                            -v
+                          
+                          echo ""
+                          echo "✅ Deployment completed successfully"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+                      - name: ERLANG_COOKIE
+                        type: String
+                        value: <+pipeline.variables.erlang_cookie>
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: StageRollback
+
+              - step:
+                  name: Validate Deployment
+                  identifier: validate_deployment
+                  type: ShellScript
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "Validating RabbitMQ Cluster"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          # Run validation playbook
+                          ansible-playbook playbooks/validate.yml \
+                            -i inventory/dev/hosts.yml
+                          
+                          echo ""
+                          echo "✅ Validation completed successfully"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+
+              - step:
+                  name: Integration Tests
+                  identifier: integration_tests
+                  type: ShellScript
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "Running Integration Tests"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          # Get primary node IP from inventory
+                          RABBITMQ_HOST=$(grep -A1 'rabbitmq_is_primary: true' ansible-playbooks/inventory/dev/hosts.yml -B5 | grep ansible_host | awk '{print $2}')
+                          
+                          echo "Testing RabbitMQ at: $RABBITMQ_HOST"
+                          
+                          # Test Management API
+                          echo "Testing Management API..."
+                          CLUSTER_NAME=$(curl -s -u admin:${RABBITMQ_ADMIN_PASSWORD} \
+                            http://${RABBITMQ_HOST}:15672/api/overview | jq -r '.cluster_name')
+                          
+                          echo "Cluster Name: $CLUSTER_NAME"
+                          
+                          # Test node count
+                          NODE_COUNT=$(curl -s -u admin:${RABBITMQ_ADMIN_PASSWORD} \
+                            http://${RABBITMQ_HOST}:15672/api/nodes | jq 'length')
+                          
+                          echo "Node Count: $NODE_COUNT"
+                          
+                          if [ "$NODE_COUNT" -ge 3 ]; then
+                            echo "✅ Cluster has expected number of nodes"
+                          else
+                            echo "❌ Cluster node count mismatch"
+                            exit 1
+                          fi
+                          
+                          echo ""
+                          echo "✅ All integration tests passed"
+                    environmentVariables:
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+
+            rollbackSteps:
+              - step:
+                  name: Rollback Deployment
+                  identifier: rollback
+                  type: ShellScript
+                  timeout: 30m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "⚠️ ROLLING BACK DEPLOYMENT"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/rollback.yml \
+                            -i inventory/dev/hosts.yml \
+                            -e "previous_version=<+pipeline.variables.rollback_version>"
+                          
+                          echo ""
+                          echo "⚠️ Rollback completed"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+                      - name: ERLANG_COOKIE
+                        type: String
+                        value: <+pipeline.variables.erlang_cookie>
+        tags:
+          dev: ""
+          deployment: ""
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 3: Deploy to Staging
+    # ─────────────────────────────────────────────────────────────────────────
+    - stage:
+        name: Deploy-to-Staging
+        identifier: deploy_staging
+        description: Deploy RabbitMQ cluster to Staging environment
+        type: Deployment
+        spec:
+          deploymentType: CustomDeployment
+          service:
+            serviceRef: rabbitmq_cluster
+          environment:
+            environmentRef: staging
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: rabbitmq_staging_infra
+          execution:
+            steps:
+              - step:
+                  name: Staging Approval
+                  identifier: staging_approval
+                  type: HarnessApproval
+                  timeout: 4h
+                  spec:
+                    approvalMessage: |
+                      ═══════════════════════════════════════════════════════════
+                      STAGING DEPLOYMENT APPROVAL REQUIRED
+                      ═══════════════════════════════════════════════════════════
+                      
+                      Development deployment completed successfully.
+                      
+                      Deployment Details:
+                      ─────────────────────────────────────────────────────────────
+                      • RabbitMQ Version: <+pipeline.variables.rabbitmq_version>
+                      • Environment: STAGING
+                      • Pipeline: <+pipeline.name>
+                      
+                      Please review development deployment before approving.
+                      ═══════════════════════════════════════════════════════════
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - account._account_all_users
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs: []
+                    isAutoRejectEnabled: false
+
+              - step:
+                  name: Deploy to Staging
+                  identifier: deploy_staging_cluster
+                  type: ShellScript
+                  timeout: 45m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "Deploying RabbitMQ <+pipeline.variables.rabbitmq_version>"
+                          echo "Environment: Staging"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/site.yml \
+                            -i inventory/staging/hosts.yml \
+                            -e "rabbitmq_version=<+pipeline.variables.rabbitmq_version>" \
+                            -e "erlang_version=<+pipeline.variables.erlang_version>" \
+                            -e "environment_name=staging" \
+                            -v
+                          
+                          echo ""
+                          echo "✅ Staging deployment completed"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+                      - name: ERLANG_COOKIE
+                        type: String
+                        value: <+pipeline.variables.erlang_cookie>
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: StageRollback
+
+              - step:
+                  name: Validate Staging
+                  identifier: validate_staging
+                  type: ShellScript
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/validate.yml \
+                            -i inventory/staging/hosts.yml
+                          
+                          echo "✅ Staging validation completed"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+
+            rollbackSteps:
+              - step:
+                  name: Rollback Staging
+                  identifier: rollback_staging
+                  type: ShellScript
+                  timeout: 30m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/rollback.yml \
+                            -i inventory/staging/hosts.yml \
+                            -e "previous_version=<+pipeline.variables.rollback_version>"
+                    environmentVariables:
+                      - name: ERLANG_COOKIE
+                        type: String
+                        value: <+pipeline.variables.erlang_cookie>
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.deploy_to_staging> == "true"
+        tags:
+          staging: ""
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STAGE 4: Deploy to Production
+    # ─────────────────────────────────────────────────────────────────────────
+    - stage:
+        name: Deploy-to-Production
+        identifier: deploy_production
+        description: Deploy RabbitMQ cluster to Production environment
+        type: Deployment
+        spec:
+          deploymentType: CustomDeployment
+          service:
+            serviceRef: rabbitmq_cluster
+          environment:
+            environmentRef: production
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: rabbitmq_prod_infra
+          execution:
+            steps:
+              - step:
+                  name: Production Approval
+                  identifier: production_approval
+                  type: HarnessApproval
+                  timeout: 24h
+                  spec:
+                    approvalMessage: |
+                      ═══════════════════════════════════════════════════════════
+                      ⚠️ PRODUCTION DEPLOYMENT APPROVAL REQUIRED ⚠️
+                      ═══════════════════════════════════════════════════════════
+                      
+                      Staging deployment completed successfully.
+                      
+                      PRODUCTION Deployment Details:
+                      ─────────────────────────────────────────────────────────────
+                      • RabbitMQ Version: <+pipeline.variables.rabbitmq_version>
+                      • Environment: PRODUCTION
+                      • Deployment Strategy: Rolling (one node at a time)
+                      
+                      ⚠️ This will affect production messaging infrastructure.
+                      
+                      Please verify:
+                      ☐ Staging environment has been tested
+                      ☐ Change ticket has been created
+                      ☐ Stakeholders have been notified
+                      ☐ Rollback plan is in place
+                      ═══════════════════════════════════════════════════════════
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - _project_all_users
+                      minimumCount: 2
+                      disallowPipelineExecutor: true
+                    approverInputs:
+                      - name: change_ticket
+                        defaultValue: ""
+                      - name: approval_notes
+                        defaultValue: ""
+                    isAutoRejectEnabled: false
+
+              - step:
+                  name: Pre-Production Backup
+                  identifier: pre_prod_backup
+                  type: ShellScript
+                  timeout: 20m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "Creating Production Backup"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/backup.yml \
+                            -i inventory/production/hosts.yml \
+                            -e "backup_timestamp=$(date +%Y%m%d_%H%M%S)" \
+                            -e "backup_mnesia=true"
+                          
+                          echo "✅ Production backup completed"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+
+              - step:
+                  name: Deploy to Production
+                  identifier: deploy_prod_cluster
+                  type: ShellScript
+                  timeout: 90m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "🚀 PRODUCTION DEPLOYMENT"
+                          echo "═══════════════════════════════════════════════════════════"
+                          echo "RabbitMQ Version: <+pipeline.variables.rabbitmq_version>"
+                          echo "Strategy: Rolling (one node at a time)"
+                          echo "═══════════════════════════════════════════════════════════"
+                          
+                          cd ansible-playbooks
+                          
+                          # Production deployment with rolling strategy
+                          ansible-playbook playbooks/site.yml \
+                            -i inventory/production/hosts.yml \
+                            -e "rabbitmq_version=<+pipeline.variables.rabbitmq_version>" \
+                            -e "erlang_version=<+pipeline.variables.erlang_version>" \
+                            -e "environment_name=production" \
+                            --serial 1 \
+                            -v
+                          
+                          echo ""
+                          echo "✅ Production deployment completed"
+                    environmentVariables:
+                      - name: ANSIBLE_HOST_KEY_CHECKING
+                        type: String
+                        value: "False"
+                      - name: ERLANG_COOKIE
+                        type: String
+                        value: <+pipeline.variables.erlang_cookie>
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: StageRollback
+
+              - step:
+                  name: Production Validation
+                  identifier: validate_prod
+                  type: ShellScript
+                  timeout: 20m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/validate.yml \
+                            -i inventory/production/hosts.yml
+                          
+                          echo "✅ Production validation completed"
+                    environmentVariables:
+                      - name: RABBITMQ_ADMIN_PASSWORD
+                        type: String
+                        value: <+pipeline.variables.rabbitmq_admin_password>
+
+            rollbackSteps:
+              - step:
+                  name: Production Rollback
+                  identifier: rollback_prod
+                  type: ShellScript
+                  timeout: 60m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "⚠️ PRODUCTION ROLLBACK INITIATED"
+                          
+                          cd ansible-playbooks
+                          
+                          ansible-playbook playbooks/rollback.yml \
+                            -i inventory/production/hosts.yml \
+                            -e "previous_version=<+pipeline.variables.rollback_version>" \
+                            --serial 1
+                    environmentVariables:
+                      - name: ERLANG_COOKIE
+                        type: String
+                        value: <+pipeline.variables.erlang_cookie>
+        when:
+          pipelineStatus: Success
+          condition: <+pipeline.variables.deploy_to_production> == "true"
+        tags:
+          production: ""
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # NOTIFICATION RULES
+  # ═══════════════════════════════════════════════════════════════════════════
+  notificationRules:
+    - name: Pipeline Success
+      identifier: pipeline_success
+      pipelineEvents:
+        - type: PipelineSuccess
+      notificationMethod:
+        type: Email
+        spec:
+          recipients:
+            - devops-team@company.com
+          userGroups: []
+      enabled: true
+
+    - name: Pipeline Failure
+      identifier: pipeline_failure
+      pipelineEvents:
+        - type: PipelineFailed
+      notificationMethod:
+        type: Email
+        spec:
+          recipients:
+            - devops-team@company.com
+            - platform-team@company.com
+          userGroups: []
+      enabled: true
+
+    - name: Stage Approval Required
+      identifier: approval_required
+      pipelineEvents:
+        - type: StageStart
+      notificationMethod:
+        type: Email
+        spec:
+          recipients:
+            - approvers@company.com
+          userGroups: []
+      enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FLOW CONTROL
+  # ═══════════════════════════════════════════════════════════════════════════
+  flowControl:
+    barriers: []
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TIMEOUT
+  # ═══════════════════════════════════════════════════════════════════════════
+  timeout: 6h

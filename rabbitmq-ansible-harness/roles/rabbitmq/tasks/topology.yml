@@ -1,0 +1,104 @@
+# RabbitMQ Topology Configuration (Exchanges, Queues, Bindings)
+---
+- name: "TOPOLOGY: Configure exchanges, queues, and bindings"
+  ansible.builtin.debug:
+    msg: "Configuring RabbitMQ topology..."
+  run_once: true
+
+# ═══════════════════════════════════════════════════════════
+# EXCHANGES
+# ═══════════════════════════════════════════════════════════
+- name: "TOPOLOGY: Create exchanges"
+  community.rabbitmq.rabbitmq_exchange:
+    name: "{{ item.name }}"
+    type: "{{ item.type | default('direct') }}"
+    vhost: "{{ item.vhost | default('/') }}"
+    durable: "{{ item.durable | default(true) }}"
+    auto_delete: "{{ item.auto_delete | default(false) }}"
+    internal: "{{ item.internal | default(false) }}"
+    arguments: "{{ item.arguments | default({}) }}"
+    state: present
+    login_user: "{{ rabbitmq_admin_user }}"
+    login_password: "{{ rabbitmq_admin_password }}"
+    login_host: "{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}"
+  loop: "{{ rabbitmq_exchanges | default([]) }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.type | default('direct') }})"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  when: rabbitmq_exchanges is defined and rabbitmq_exchanges | length > 0
+
+# ═══════════════════════════════════════════════════════════
+# QUEUES
+# ═══════════════════════════════════════════════════════════
+- name: "TOPOLOGY: Create queues"
+  community.rabbitmq.rabbitmq_queue:
+    name: "{{ item.name }}"
+    vhost: "{{ item.vhost | default('/') }}"
+    durable: "{{ item.durable | default(true) }}"
+    auto_delete: "{{ item.auto_delete | default(false) }}"
+    arguments: "{{ item.arguments | default({}) }}"
+    state: present
+    login_user: "{{ rabbitmq_admin_user }}"
+    login_password: "{{ rabbitmq_admin_password }}"
+    login_host: "{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}"
+  loop: "{{ rabbitmq_queues | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  when: rabbitmq_queues is defined and rabbitmq_queues | length > 0
+
+# ═══════════════════════════════════════════════════════════
+# BINDINGS
+# ═══════════════════════════════════════════════════════════
+- name: "TOPOLOGY: Create bindings"
+  community.rabbitmq.rabbitmq_binding:
+    name: "{{ item.source }}->{{ item.destination }}"
+    source: "{{ item.source }}"
+    destination: "{{ item.destination }}"
+    destination_type: "{{ item.destination_type | default('queue') }}"
+    routing_key: "{{ item.routing_key | default('') }}"
+    vhost: "{{ item.vhost | default('/') }}"
+    arguments: "{{ item.arguments | default({}) }}"
+    state: present
+    login_user: "{{ rabbitmq_admin_user }}"
+    login_password: "{{ rabbitmq_admin_password }}"
+    login_host: "{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}"
+  loop: "{{ rabbitmq_bindings | default([]) }}"
+  loop_control:
+    label: "{{ item.source }} -> {{ item.destination }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  when: rabbitmq_bindings is defined and rabbitmq_bindings | length > 0
+
+# ═══════════════════════════════════════════════════════════
+# VERIFICATION
+# ═══════════════════════════════════════════════════════════
+- name: "TOPOLOGY: List exchanges"
+  ansible.builtin.command: rabbitmqctl list_exchanges
+  register: exchange_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "TOPOLOGY: List queues"
+  ansible.builtin.command: rabbitmqctl list_queues name messages consumers
+  register: queue_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "TOPOLOGY: Display topology summary"
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      TOPOLOGY SUMMARY
+      ════════════════════════════════════════════════════════
+      EXCHANGES:
+      {{ exchange_list.stdout }}
+      
+      QUEUES:
+      {{ queue_list.stdout }}
+      ════════════════════════════════════════════════════════
+  run_once: true

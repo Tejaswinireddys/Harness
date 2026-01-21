@@ -1,0 +1,321 @@
+# Development Environment Variables
+# RabbitMQ 4.x Cluster Configuration
+---
+# ═══════════════════════════════════════════════════════════
+# Environment Configuration
+# ═══════════════════════════════════════════════════════════
+environment_name: development
+environment_short: dev
+deployment_env: development
+
+# ═══════════════════════════════════════════════════════════
+# RabbitMQ Version Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_version: "4.0.3"
+rabbitmq_release_series: "4.0"
+rabbitmq_package_url: ""  # Empty to use repository
+
+# ═══════════════════════════════════════════════════════════
+# Erlang Configuration
+# ═══════════════════════════════════════════════════════════
+erlang_version: "26.2"
+erlang_package_url: ""  # Empty to use repository
+
+# ═══════════════════════════════════════════════════════════
+# Cluster Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_cluster_name: "rabbitmq-{{ environment_short }}-cluster"
+rabbitmq_primary_node: "rabbitmq-dev-1"
+rabbitmq_cluster_partition_handling: pause_minority
+
+# Erlang Cookie - MUST be identical across all nodes
+# Override via environment variable or Harness secret
+erlang_cookie: "{{ lookup('env', 'ERLANG_COOKIE') | default('CHANGE_THIS_ERLANG_COOKIE_VALUE') }}"
+
+# ═══════════════════════════════════════════════════════════
+# Authentication Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_admin_user: admin
+rabbitmq_admin_password: "{{ lookup('env', 'RABBITMQ_ADMIN_PASSWORD') | default('ChangeMe123!') }}"
+
+# ═══════════════════════════════════════════════════════════
+# Virtual Hosts Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_vhosts:
+  - name: /
+    description: Default vhost
+    state: present
+  - name: /app
+    description: Application vhost
+    state: present
+  - name: /monitoring
+    description: Monitoring vhost
+    state: present
+  - name: /integration
+    description: Integration testing vhost
+    state: present
+
+# ═══════════════════════════════════════════════════════════
+# User Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_users:
+  - user: admin
+    password: "{{ rabbitmq_admin_password }}"
+    tags: administrator
+    vhost: /
+    configure_priv: .*
+    read_priv: .*
+    write_priv: .*
+    state: present
+    
+  - user: app_user
+    password: "{{ lookup('env', 'RABBITMQ_APP_PASSWORD') | default('AppUserPass123!') }}"
+    tags: ""
+    vhost: /app
+    configure_priv: .*
+    read_priv: .*
+    write_priv: .*
+    state: present
+    
+  - user: monitoring_user
+    password: "{{ lookup('env', 'RABBITMQ_MONITORING_PASSWORD') | default('MonitorPass123!') }}"
+    tags: monitoring
+    vhost: /
+    configure_priv: ""
+    read_priv: .*
+    write_priv: ""
+    state: present
+    
+  - user: integration_user
+    password: "{{ lookup('env', 'RABBITMQ_INTEGRATION_PASSWORD') | default('IntegrationPass123!') }}"
+    tags: ""
+    vhost: /integration
+    configure_priv: .*
+    read_priv: .*
+    write_priv: .*
+    state: present
+
+# ═══════════════════════════════════════════════════════════
+# Plugin Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_plugins:
+  - rabbitmq_management
+  - rabbitmq_management_agent
+  - rabbitmq_prometheus
+  - rabbitmq_shovel
+  - rabbitmq_shovel_management
+  - rabbitmq_federation
+  - rabbitmq_federation_management
+  - rabbitmq_consistent_hash_exchange
+  - rabbitmq_top
+
+# ═══════════════════════════════════════════════════════════
+# Resource Limits
+# ═══════════════════════════════════════════════════════════
+rabbitmq_vm_memory_high_watermark: 0.6
+rabbitmq_vm_memory_high_watermark_paging_ratio: 0.5
+rabbitmq_disk_free_limit: "2GB"
+rabbitmq_channel_max: 2047
+rabbitmq_max_message_size: 134217728  # 128 MB
+
+# ═══════════════════════════════════════════════════════════
+# Network Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_listeners:
+  - port: 5672
+    ip: "::"
+    
+rabbitmq_management_listener:
+  port: 15672
+  ip: "::"
+  ssl: false
+
+rabbitmq_prometheus_port: 15692
+
+# TCP settings
+rabbitmq_tcp_listen_options:
+  backlog: 4096
+  nodelay: true
+  linger_on: true
+  linger_timeout: 0
+  sndbuf: 196608
+  recbuf: 196608
+
+# ═══════════════════════════════════════════════════════════
+# TLS Configuration (Optional - for production)
+# ═══════════════════════════════════════════════════════════
+rabbitmq_ssl_enabled: false
+rabbitmq_ssl_port: 5671
+rabbitmq_ssl_cacertfile: ""
+rabbitmq_ssl_certfile: ""
+rabbitmq_ssl_keyfile: ""
+rabbitmq_ssl_verify: verify_peer
+rabbitmq_ssl_fail_if_no_peer_cert: false
+
+# ═══════════════════════════════════════════════════════════
+# Logging Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_log_level: info
+rabbitmq_log_file: /var/log/rabbitmq/rabbitmq.log
+rabbitmq_log_rotation:
+  enabled: true
+  count: 10
+  size: 10485760  # 10MB
+
+# ═══════════════════════════════════════════════════════════
+# Queue Configuration (RabbitMQ 4.x)
+# ═══════════════════════════════════════════════════════════
+rabbitmq_default_queue_type: quorum
+rabbitmq_quorum_queue_default_delivery_limit: 20
+rabbitmq_consumer_timeout: 1800000  # 30 minutes
+
+# ═══════════════════════════════════════════════════════════
+# Policy Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_policies:
+  - name: ha-all
+    pattern: "^(?!amq\\.).*"
+    vhost: /
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+    priority: 0
+    apply_to: queues
+    
+  - name: quorum-queues
+    pattern: "^quorum\\."
+    vhost: /
+    definition:
+      queue-type: quorum
+      x-quorum-initial-group-size: 3
+    priority: 1
+    apply_to: queues
+    
+  - name: lazy-queues
+    pattern: "^lazy\\."
+    vhost: /
+    definition:
+      queue-mode: lazy
+    priority: 1
+    apply_to: queues
+    
+  - name: message-ttl
+    pattern: "^ttl\\."
+    vhost: /
+    definition:
+      message-ttl: 86400000  # 24 hours
+    priority: 1
+    apply_to: queues
+
+# ═══════════════════════════════════════════════════════════
+# Exchange Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_exchanges:
+  - name: events
+    type: topic
+    vhost: /app
+    durable: true
+    auto_delete: false
+    internal: false
+    
+  - name: commands
+    type: direct
+    vhost: /app
+    durable: true
+    auto_delete: false
+    internal: false
+    
+  - name: dlx
+    type: fanout
+    vhost: /app
+    durable: true
+    auto_delete: false
+    internal: false
+
+# ═══════════════════════════════════════════════════════════
+# Queue Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_queues:
+  - name: events.processing
+    vhost: /app
+    durable: true
+    auto_delete: false
+    arguments:
+      x-queue-type: quorum
+      x-dead-letter-exchange: dlx
+      
+  - name: commands.execution
+    vhost: /app
+    durable: true
+    auto_delete: false
+    arguments:
+      x-queue-type: quorum
+      
+  - name: dlq
+    vhost: /app
+    durable: true
+    auto_delete: false
+    arguments:
+      x-queue-type: quorum
+
+# ═══════════════════════════════════════════════════════════
+# Binding Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_bindings:
+  - name: events-to-processing
+    source: events
+    destination: events.processing
+    destination_type: queue
+    routing_key: "#"
+    vhost: /app
+    
+  - name: commands-to-execution
+    source: commands
+    destination: commands.execution
+    destination_type: queue
+    routing_key: "#"
+    vhost: /app
+    
+  - name: dlx-to-dlq
+    source: dlx
+    destination: dlq
+    destination_type: queue
+    routing_key: ""
+    vhost: /app
+
+# ═══════════════════════════════════════════════════════════
+# System Configuration
+# ═══════════════════════════════════════════════════════════
+system_ulimits:
+  nofile:
+    soft: 65536
+    hard: 65536
+  nproc:
+    soft: 65536
+    hard: 65536
+
+system_sysctl:
+  net.core.somaxconn: 4096
+  net.ipv4.tcp_max_syn_backlog: 4096
+  net.ipv4.tcp_fin_timeout: 30
+  net.ipv4.tcp_keepalive_time: 600
+  net.ipv4.tcp_keepalive_intvl: 60
+  net.ipv4.tcp_keepalive_probes: 3
+  vm.swappiness: 1
+
+# ═══════════════════════════════════════════════════════════
+# Backup Configuration
+# ═══════════════════════════════════════════════════════════
+rabbitmq_backup:
+  enabled: true
+  directory: /var/backups/rabbitmq
+  retention_days: 7
+  
+# ═══════════════════════════════════════════════════════════
+# Monitoring Configuration
+# ═══════════════════════════════════════════════════════════
+monitoring:
+  prometheus_enabled: true
+  prometheus_port: 15692
+  node_exporter_enabled: true
+  node_exporter_port: 9100

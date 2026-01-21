@@ -1,0 +1,147 @@
+# RabbitMQ Installation Tasks - RHEL 8
+---
+- name: "INSTALL: Check if RabbitMQ is already installed"
+  ansible.builtin.command: rabbitmqctl version
+  register: rabbitmq_current_version
+  changed_when: false
+  failed_when: false
+
+- name: "INSTALL: Display current RabbitMQ version"
+  ansible.builtin.debug:
+    msg: "Current RabbitMQ: {{ rabbitmq_current_version.stdout | default('Not installed') }}"
+
+# ═══════════════════════════════════════════════════════════
+# RHEL 8 - ADD RABBITMQ REPOSITORY
+# ═══════════════════════════════════════════════════════════
+- name: "INSTALL: Import RabbitMQ signing key"
+  ansible.builtin.rpm_key:
+    key: https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc
+    state: present
+
+- name: "INSTALL: Import Packagecloud signing key"
+  ansible.builtin.rpm_key:
+    key: https://packagecloud.io/rabbitmq/rabbitmq-server/gpgkey
+    state: present
+
+- name: "INSTALL: Add RabbitMQ Server repository for RHEL 8"
+  ansible.builtin.yum_repository:
+    name: rabbitmq-server
+    description: RabbitMQ Server Repository for RHEL 8
+    baseurl: https://packagecloud.io/rabbitmq/rabbitmq-server/el/8/$basearch
+    gpgcheck: yes
+    gpgkey: https://packagecloud.io/rabbitmq/rabbitmq-server/gpgkey
+    repo_gpgcheck: no
+    enabled: yes
+    sslverify: yes
+    sslcacert: /etc/pki/tls/certs/ca-bundle.crt
+    metadata_expire: 300
+
+- name: "INSTALL: Clean DNF cache"
+  ansible.builtin.command: dnf clean all
+  changed_when: false
+
+- name: "INSTALL: Rebuild DNF cache"
+  ansible.builtin.command: dnf makecache
+  changed_when: false
+
+# ═══════════════════════════════════════════════════════════
+# INSTALL RABBITMQ ON RHEL 8
+# ═══════════════════════════════════════════════════════════
+- name: "INSTALL: Install RabbitMQ server (RHEL 8)"
+  ansible.builtin.dnf:
+    name:
+      - rabbitmq-server
+    state: present
+    enablerepo: rabbitmq-server
+  register: rabbitmq_install
+
+- name: "INSTALL: Display installation result"
+  ansible.builtin.debug:
+    msg: "RabbitMQ installation: {{ 'Installed' if rabbitmq_install.changed else 'Already installed' }}"
+
+# ═══════════════════════════════════════════════════════════
+# POST-INSTALLATION SETUP
+# ═══════════════════════════════════════════════════════════
+- name: "INSTALL: Create RabbitMQ directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: rabbitmq
+    group: rabbitmq
+    mode: '0755'
+  loop:
+    - /var/lib/rabbitmq
+    - /var/lib/rabbitmq/mnesia
+    - /var/log/rabbitmq
+    - /etc/rabbitmq
+
+- name: "INSTALL: Set Erlang cookie"
+  ansible.builtin.copy:
+    content: "{{ erlang_cookie }}"
+    dest: /var/lib/rabbitmq/.erlang.cookie
+    owner: rabbitmq
+    group: rabbitmq
+    mode: '0400'
+  notify: restart rabbitmq
+
+- name: "INSTALL: Set Erlang cookie for root (CLI access)"
+  ansible.builtin.copy:
+    content: "{{ erlang_cookie }}"
+    dest: /root/.erlang.cookie
+    owner: root
+    group: root
+    mode: '0400'
+
+# ═══════════════════════════════════════════════════════════
+# SELINUX CONTEXTS (RHEL 8)
+# ═══════════════════════════════════════════════════════════
+- name: "INSTALL: Restore SELinux contexts for RabbitMQ directories"
+  ansible.builtin.command: restorecon -Rv {{ item }}
+  loop:
+    - /var/lib/rabbitmq
+    - /var/log/rabbitmq
+    - /etc/rabbitmq
+  changed_when: false
+  ignore_errors: yes
+
+# ═══════════════════════════════════════════════════════════
+# SYSTEMD CONFIGURATION
+# ═══════════════════════════════════════════════════════════
+- name: "INSTALL: Create systemd override directory"
+  ansible.builtin.file:
+    path: /etc/systemd/system/rabbitmq-server.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: "INSTALL: Configure systemd service limits"
+  ansible.builtin.template:
+    src: rabbitmq-server.service.override.j2
+    dest: /etc/systemd/system/rabbitmq-server.service.d/limits.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: "INSTALL: Reload systemd daemon"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: "INSTALL: Enable RabbitMQ service"
+  ansible.builtin.systemd:
+    name: rabbitmq-server
+    enabled: yes
+
+- name: "INSTALL: Verify installation"
+  ansible.builtin.command: rabbitmqctl version
+  register: installed_version
+  changed_when: false
+
+- name: "INSTALL: Display installed version"
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      ✅ RabbitMQ INSTALLED SUCCESSFULLY
+      Version: {{ installed_version.stdout }}
+      Platform: RHEL 8
+      ════════════════════════════════════════════════════════

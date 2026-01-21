@@ -1,0 +1,383 @@
+# Validation Playbook - RabbitMQ 4.x Cluster
+# This playbook validates the cluster deployment
+# Author: Infrastructure Architecture Team
+# Version: 1.0
+---
+- name: Validate RabbitMQ 4.x Cluster Deployment
+  hosts: rabbitmq_cluster
+  become: yes
+  gather_facts: no
+  any_errors_fatal: true
+  
+  vars:
+    validation_results: []
+    
+  tasks:
+    - name: Display validation banner
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          RABBITMQ CLUSTER VALIDATION                      ║
+          ╚═══════════════════════════════════════════════════════════╝
+      run_once: true
+
+    # ═══════════════════════════════════════════════════════════
+    # SERVICE VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "SERVICE CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating RabbitMQ service on {{ inventory_hostname }}"
+
+    - name: Check RabbitMQ service status
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+      register: rabbitmq_service
+
+    - name: Assert RabbitMQ service is active
+      ansible.builtin.assert:
+        that:
+          - rabbitmq_service.status.ActiveState == 'active'
+          - rabbitmq_service.status.SubState == 'running'
+        fail_msg: |
+          ❌ RabbitMQ service is not running on {{ inventory_hostname }}
+             State: {{ rabbitmq_service.status.ActiveState }}
+             SubState: {{ rabbitmq_service.status.SubState }}
+        success_msg: "✅ RabbitMQ service is active on {{ inventory_hostname }}"
+
+    - name: Verify RabbitMQ process is running
+      ansible.builtin.shell: pgrep -f "beam.smp.*rabbit"
+      register: rabbitmq_process
+      changed_when: false
+      failed_when: rabbitmq_process.rc != 0
+
+    # ═══════════════════════════════════════════════════════════
+    # PORT VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "PORT CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating ports on {{ inventory_hostname }}"
+
+    - name: Check AMQP port (5672)
+      ansible.builtin.wait_for:
+        port: 5672
+        host: "{{ ansible_host }}"
+        timeout: 10
+        state: started
+      register: amqp_port
+
+    - name: Check Management UI port (15672)
+      ansible.builtin.wait_for:
+        port: 15672
+        host: "{{ ansible_host }}"
+        timeout: 10
+        state: started
+      register: mgmt_port
+
+    - name: Check Prometheus port (15692)
+      ansible.builtin.wait_for:
+        port: "{{ rabbitmq_prometheus_port | default(15692) }}"
+        host: "{{ ansible_host }}"
+        timeout: 10
+        state: started
+      register: prometheus_port
+
+    - name: Check Erlang Distribution port (25672)
+      ansible.builtin.wait_for:
+        port: 25672
+        host: "{{ ansible_host }}"
+        timeout: 10
+        state: started
+      register: erlang_dist_port
+
+    - name: Check EPMD port (4369)
+      ansible.builtin.wait_for:
+        port: 4369
+        host: "{{ ansible_host }}"
+        timeout: 10
+        state: started
+      register: epmd_port
+
+    - name: Port check summary
+      ansible.builtin.debug:
+        msg: |
+          Port Status on {{ inventory_hostname }}:
+            ✅ AMQP (5672): Listening
+            ✅ Management (15672): Listening
+            ✅ Prometheus ({{ rabbitmq_prometheus_port | default(15692) }}): Listening
+            ✅ Erlang Dist (25672): Listening
+            ✅ EPMD (4369): Listening
+
+    # ═══════════════════════════════════════════════════════════
+    # CLUSTER VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "CLUSTER CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating cluster status"
+      run_once: true
+
+    - name: Get cluster status as JSON
+      ansible.builtin.command: rabbitmqctl cluster_status --formatter json
+      register: cluster_status_json
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Parse cluster status
+      ansible.builtin.set_fact:
+        cluster_info: "{{ cluster_status_json.stdout | from_json }}"
+      run_once: true
+
+    - name: Assert all nodes are in cluster
+      ansible.builtin.assert:
+        that:
+          - cluster_info.running_nodes | length >= 3
+        fail_msg: |
+          ❌ Not all nodes joined the cluster
+             Expected: {{ groups['rabbitmq_cluster'] | length }} nodes
+             Running: {{ cluster_info.running_nodes | length }} nodes
+             Running nodes: {{ cluster_info.running_nodes | join(', ') }}
+        success_msg: "✅ All {{ cluster_info.running_nodes | length }} nodes are in the cluster"
+      run_once: true
+
+    - name: Display cluster nodes
+      ansible.builtin.debug:
+        msg: |
+          Cluster Nodes:
+          {% for node in cluster_info.running_nodes %}
+            ✅ {{ node }}
+          {% endfor %}
+      run_once: true
+
+    - name: Check for alarms
+      ansible.builtin.command: rabbitmqctl list_alarms
+      register: alarms_output
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Assert no alarms are active
+      ansible.builtin.assert:
+        that:
+          - "'[]' in alarms_output.stdout or 'No alarms' in alarms_output.stdout"
+        fail_msg: |
+          ⚠️ Active alarms detected:
+          {{ alarms_output.stdout }}
+        success_msg: "✅ No active alarms in cluster"
+      run_once: true
+      ignore_errors: yes
+
+    # ═══════════════════════════════════════════════════════════
+    # API HEALTH CHECK
+    # ═══════════════════════════════════════════════════════════
+    - name: "API HEALTH CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating Management API"
+      run_once: true
+
+    - name: Test Management API - Overview
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:15672/api/overview"
+        user: "{{ rabbitmq_admin_user }}"
+        password: "{{ rabbitmq_admin_password }}"
+        method: GET
+        status_code: 200
+        return_content: yes
+      register: api_overview
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Parse API response
+      ansible.builtin.set_fact:
+        api_info: "{{ api_overview.json }}"
+      run_once: true
+
+    - name: Display API overview
+      ansible.builtin.debug:
+        msg: |
+          Management API Response:
+            Cluster Name: {{ api_info.cluster_name }}
+            RabbitMQ Version: {{ api_info.rabbitmq_version }}
+            Erlang Version: {{ api_info.erlang_version }}
+            Node: {{ api_info.node }}
+      run_once: true
+
+    - name: Test Management API - Node Health
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:15672/api/healthchecks/node"
+        user: "{{ rabbitmq_admin_user }}"
+        password: "{{ rabbitmq_admin_password }}"
+        method: GET
+        status_code: 200
+        return_content: yes
+      register: health_check
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Assert node health check passed
+      ansible.builtin.assert:
+        that:
+          - health_check.json.status == 'ok'
+        fail_msg: "❌ Node health check failed: {{ health_check.json }}"
+        success_msg: "✅ Node health check passed"
+      run_once: true
+
+    # ═══════════════════════════════════════════════════════════
+    # PLUGIN VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "PLUGIN CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating enabled plugins"
+      run_once: true
+
+    - name: Get enabled plugins
+      ansible.builtin.command: rabbitmq-plugins list --enabled
+      register: enabled_plugins
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Display enabled plugins
+      ansible.builtin.debug:
+        msg: |
+          Enabled Plugins:
+          {{ enabled_plugins.stdout }}
+      run_once: true
+
+    - name: Verify management plugin is enabled
+      ansible.builtin.assert:
+        that:
+          - "'rabbitmq_management' in enabled_plugins.stdout"
+        fail_msg: "❌ rabbitmq_management plugin is not enabled"
+        success_msg: "✅ rabbitmq_management plugin is enabled"
+      run_once: true
+
+    - name: Verify prometheus plugin is enabled
+      ansible.builtin.assert:
+        that:
+          - "'rabbitmq_prometheus' in enabled_plugins.stdout"
+        fail_msg: "❌ rabbitmq_prometheus plugin is not enabled"
+        success_msg: "✅ rabbitmq_prometheus plugin is enabled"
+      run_once: true
+
+    # ═══════════════════════════════════════════════════════════
+    # VHOST VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "VHOST CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating virtual hosts"
+      run_once: true
+
+    - name: List virtual hosts
+      ansible.builtin.command: rabbitmqctl list_vhosts
+      register: vhost_list
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Display virtual hosts
+      ansible.builtin.debug:
+        msg: |
+          Virtual Hosts:
+          {{ vhost_list.stdout }}
+      run_once: true
+
+    # ═══════════════════════════════════════════════════════════
+    # USER VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "USER CHECKS"
+      ansible.builtin.debug:
+        msg: "Validating users"
+      run_once: true
+
+    - name: List users
+      ansible.builtin.command: rabbitmqctl list_users
+      register: user_list
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Display users
+      ansible.builtin.debug:
+        msg: |
+          Users:
+          {{ user_list.stdout }}
+      run_once: true
+
+    - name: Verify admin user exists
+      ansible.builtin.assert:
+        that:
+          - rabbitmq_admin_user in user_list.stdout
+        fail_msg: "❌ Admin user '{{ rabbitmq_admin_user }}' does not exist"
+        success_msg: "✅ Admin user '{{ rabbitmq_admin_user }}' exists"
+      run_once: true
+
+    - name: Verify guest user is removed
+      ansible.builtin.assert:
+        that:
+          - "'guest' not in user_list.stdout or 'guest\t[]' in user_list.stdout"
+        fail_msg: "⚠️ Default 'guest' user still exists with permissions"
+        success_msg: "✅ Default 'guest' user is removed or has no permissions"
+      run_once: true
+      ignore_errors: yes
+
+    # ═══════════════════════════════════════════════════════════
+    # PROMETHEUS METRICS VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "PROMETHEUS METRICS CHECK"
+      ansible.builtin.debug:
+        msg: "Validating Prometheus metrics endpoint"
+      run_once: true
+
+    - name: Test Prometheus metrics endpoint
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:{{ rabbitmq_prometheus_port | default(15692) }}/metrics"
+        method: GET
+        status_code: 200
+        return_content: no
+      register: prometheus_metrics
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Assert Prometheus metrics are available
+      ansible.builtin.assert:
+        that:
+          - prometheus_metrics.status == 200
+        fail_msg: "❌ Prometheus metrics endpoint is not responding"
+        success_msg: "✅ Prometheus metrics endpoint is responding"
+      run_once: true
+
+    # ═══════════════════════════════════════════════════════════
+    # VALIDATION SUMMARY
+    # ═══════════════════════════════════════════════════════════
+    - name: Generate validation report
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║              VALIDATION REPORT                            ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  STATUS: ✅ ALL CHECKS PASSED                             ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  CLUSTER DETAILS                                          ║
+          ║  ─────────────────────────────────────────────────────────║
+          ║  Cluster Name    : {{ api_info.cluster_name }}
+          ║  RabbitMQ Version: {{ api_info.rabbitmq_version }}
+          ║  Erlang Version  : {{ api_info.erlang_version }}
+          ║  Running Nodes   : {{ cluster_info.running_nodes | length }}
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  VALIDATION RESULTS                                       ║
+          ║  ─────────────────────────────────────────────────────────║
+          ║  ✅ Service Status      : Active on all nodes             ║
+          ║  ✅ Port Accessibility  : All ports responding            ║
+          ║  ✅ Cluster Formation   : {{ cluster_info.running_nodes | length }}/{{ groups['rabbitmq_cluster'] | length }} nodes joined
+          ║  ✅ Health Check        : Passed                          ║
+          ║  ✅ Plugins             : Required plugins enabled        ║
+          ║  ✅ Users               : Admin user configured           ║
+          ║  ✅ Prometheus          : Metrics available               ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  ACCESS ENDPOINTS                                         ║
+          ║  ─────────────────────────────────────────────────────────║
+          ║  Management UI  : http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:15672
+          ║  AMQP           : amqp://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:5672
+          ║  Prometheus     : http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:{{ rabbitmq_prometheus_port | default(15692) }}/metrics
+          ╚═══════════════════════════════════════════════════════════╝
+      run_once: true

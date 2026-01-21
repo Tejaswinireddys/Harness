@@ -1,0 +1,106 @@
+# RabbitMQ User Management Tasks
+---
+- name: "USERS: Configure virtual hosts and users"
+  ansible.builtin.debug:
+    msg: "Configuring virtual hosts and users..."
+  run_once: true
+
+# ═══════════════════════════════════════════════════════════
+# VIRTUAL HOSTS
+# ═══════════════════════════════════════════════════════════
+- name: "USERS: Create virtual hosts"
+  community.rabbitmq.rabbitmq_vhost:
+    name: "{{ item.name }}"
+    state: "{{ item.state | default('present') }}"
+    tracing: "{{ item.tracing | default(false) }}"
+  loop: "{{ rabbitmq_vhosts }}"
+  loop_control:
+    label: "{{ item.name }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+# ═══════════════════════════════════════════════════════════
+# USERS
+# ═══════════════════════════════════════════════════════════
+- name: "USERS: Create RabbitMQ users"
+  community.rabbitmq.rabbitmq_user:
+    user: "{{ item.user }}"
+    password: "{{ item.password }}"
+    tags: "{{ item.tags }}"
+    vhost: "{{ item.vhost }}"
+    configure_priv: "{{ item.configure_priv }}"
+    read_priv: "{{ item.read_priv }}"
+    write_priv: "{{ item.write_priv }}"
+    state: "{{ item.state | default('present') }}"
+  loop: "{{ rabbitmq_users }}"
+  loop_control:
+    label: "{{ item.user }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  no_log: true  # Hide passwords in logs
+
+# ═══════════════════════════════════════════════════════════
+# SECURITY: REMOVE DEFAULT USER
+# ═══════════════════════════════════════════════════════════
+- name: "USERS: Remove default guest user"
+  community.rabbitmq.rabbitmq_user:
+    user: guest
+    state: absent
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  ignore_errors: yes
+
+# ═══════════════════════════════════════════════════════════
+# ADDITIONAL PERMISSIONS
+# ═══════════════════════════════════════════════════════════
+- name: "USERS: Set permissions for users on additional vhosts"
+  community.rabbitmq.rabbitmq_user:
+    user: "{{ item.0.user }}"
+    vhost: "{{ item.1.vhost }}"
+    configure_priv: "{{ item.1.configure_priv | default('') }}"
+    read_priv: "{{ item.1.read_priv | default('') }}"
+    write_priv: "{{ item.1.write_priv | default('') }}"
+    state: present
+  loop: "{{ rabbitmq_users | subelements('additional_vhosts', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item.0.user }} -> {{ item.1.vhost }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  no_log: true
+
+# ═══════════════════════════════════════════════════════════
+# VERIFICATION
+# ═══════════════════════════════════════════════════════════
+- name: "USERS: List configured users"
+  ansible.builtin.command: rabbitmqctl list_users
+  register: user_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "USERS: Display configured users"
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      CONFIGURED USERS
+      ════════════════════════════════════════════════════════
+      {{ user_list.stdout }}
+      ════════════════════════════════════════════════════════
+  run_once: true
+
+- name: "USERS: List virtual hosts"
+  ansible.builtin.command: rabbitmqctl list_vhosts
+  register: vhost_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "USERS: Display virtual hosts"
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      VIRTUAL HOSTS
+      ════════════════════════════════════════════════════════
+      {{ vhost_list.stdout }}
+      ════════════════════════════════════════════════════════
+  run_once: true

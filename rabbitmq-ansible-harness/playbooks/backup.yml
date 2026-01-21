@@ -1,0 +1,147 @@
+# Backup Playbook - RabbitMQ 4.x Cluster
+# This playbook creates backups before deployment
+# Author: Infrastructure Architecture Team
+# Version: 1.0
+---
+- name: Backup RabbitMQ Cluster
+  hosts: rabbitmq_cluster
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    backup_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    backup_base_dir: "/var/backups/rabbitmq"
+    backup_dir: "{{ backup_base_dir }}/{{ backup_timestamp }}"
+    backup_retention_days: 7
+    
+  tasks:
+    - name: Display backup banner
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          RABBITMQ BACKUP PROCEDURE                        ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Node         : {{ inventory_hostname }}
+          ║  Backup Dir   : {{ backup_dir }}
+          ║  Timestamp    : {{ backup_timestamp }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+    - name: Create backup directory structure
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0755'
+      loop:
+        - "{{ backup_base_dir }}"
+        - "{{ backup_dir }}"
+
+    - name: Check if RabbitMQ is running
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+      register: rabbitmq_status
+
+    - name: Export definitions (primary node only)
+      ansible.builtin.command: >
+        rabbitmqctl export_definitions
+        {{ backup_dir }}/definitions.json
+      when:
+        - rabbitmq_status.status.ActiveState == 'active'
+        - rabbitmq_is_primary | default(false)
+      register: definitions_export
+
+    - name: Backup RabbitMQ configuration files
+      ansible.builtin.archive:
+        path:
+          - /etc/rabbitmq/rabbitmq.conf
+          - /etc/rabbitmq/advanced.config
+          - /etc/rabbitmq/enabled_plugins
+        dest: "{{ backup_dir }}/config-{{ inventory_hostname }}.tar.gz"
+        format: gz
+      ignore_errors: yes
+
+    - name: Backup Erlang cookie
+      ansible.builtin.copy:
+        src: /var/lib/rabbitmq/.erlang.cookie
+        dest: "{{ backup_dir }}/erlang.cookie.{{ inventory_hostname }}"
+        remote_src: yes
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0400'
+      ignore_errors: yes
+
+    - name: Get Mnesia directory size
+      ansible.builtin.shell: |
+        du -sh /var/lib/rabbitmq/mnesia 2>/dev/null | cut -f1
+      register: mnesia_size
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display Mnesia size
+      ansible.builtin.debug:
+        msg: "Mnesia directory size: {{ mnesia_size.stdout | default('Unknown') }}"
+
+    - name: Backup Mnesia data (optional - can be large)
+      ansible.builtin.archive:
+        path: /var/lib/rabbitmq/mnesia
+        dest: "{{ backup_dir }}/mnesia-{{ inventory_hostname }}.tar.gz"
+        format: gz
+      when: 
+        - backup_mnesia | default(false)
+        - rabbitmq_status.status.ActiveState == 'active'
+      ignore_errors: yes
+
+    - name: Create backup metadata
+      ansible.builtin.copy:
+        content: |
+          ---
+          backup_timestamp: {{ backup_timestamp }}
+          node: {{ inventory_hostname }}
+          ansible_host: {{ ansible_host }}
+          rabbitmq_running: {{ rabbitmq_status.status.ActiveState == 'active' }}
+          is_primary: {{ rabbitmq_is_primary | default(false) }}
+          backup_contents:
+            - definitions.json (cluster-wide, primary only)
+            - config-{{ inventory_hostname }}.tar.gz
+            - erlang.cookie.{{ inventory_hostname }}
+            {% if backup_mnesia | default(false) %}
+            - mnesia-{{ inventory_hostname }}.tar.gz
+            {% endif %}
+        dest: "{{ backup_dir }}/backup_metadata_{{ inventory_hostname }}.yml"
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0644'
+
+    - name: Clean up old backups
+      ansible.builtin.find:
+        paths: "{{ backup_base_dir }}"
+        file_type: directory
+        age: "{{ backup_retention_days }}d"
+      register: old_backups
+
+    - name: Remove old backup directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: List current backups
+      ansible.builtin.find:
+        paths: "{{ backup_base_dir }}"
+        file_type: directory
+      register: current_backups
+
+    - name: Backup summary
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          BACKUP COMPLETED                                 ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Node       : {{ inventory_hostname }}
+          ║  Location   : {{ backup_dir }}
+          ║  Retained   : {{ current_backups.files | length }} backup(s)
+          ║  Removed    : {{ old_backups.files | length }} old backup(s)
+          ╚═══════════════════════════════════════════════════════════╝

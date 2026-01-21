@@ -1,0 +1,124 @@
+# Staging Environment Variables
+# RabbitMQ 4.x Cluster Configuration
+---
+# Environment Configuration
+environment_name: staging
+environment_short: stg
+deployment_env: staging
+
+# RabbitMQ Configuration (inherit most from dev, override as needed)
+rabbitmq_version: "4.0.3"
+rabbitmq_release_series: "4.0"
+
+# Erlang Configuration
+erlang_version: "26.2"
+
+# Cluster Configuration
+rabbitmq_cluster_name: "rabbitmq-{{ environment_short }}-cluster"
+rabbitmq_primary_node: "rabbitmq-stg-1"
+rabbitmq_cluster_partition_handling: pause_minority
+
+# Authentication
+erlang_cookie: "{{ lookup('env', 'ERLANG_COOKIE') }}"
+rabbitmq_admin_user: admin
+rabbitmq_admin_password: "{{ lookup('env', 'RABBITMQ_ADMIN_PASSWORD') }}"
+
+# Virtual Hosts
+rabbitmq_vhosts:
+  - name: /
+    state: present
+  - name: /app
+    state: present
+  - name: /monitoring
+    state: present
+
+# Users
+rabbitmq_users:
+  - user: admin
+    password: "{{ rabbitmq_admin_password }}"
+    tags: administrator
+    vhost: /
+    configure_priv: .*
+    read_priv: .*
+    write_priv: .*
+    state: present
+  - user: app_user
+    password: "{{ lookup('env', 'RABBITMQ_APP_PASSWORD') | default('StgAppPass123!') }}"
+    tags: ""
+    vhost: /app
+    configure_priv: .*
+    read_priv: .*
+    write_priv: .*
+    state: present
+  - user: monitoring_user
+    password: "{{ lookup('env', 'RABBITMQ_MONITORING_PASSWORD') | default('StgMonitorPass!') }}"
+    tags: monitoring
+    vhost: /
+    configure_priv: ""
+    read_priv: .*
+    write_priv: ""
+    state: present
+
+# Plugins
+rabbitmq_plugins:
+  - rabbitmq_management
+  - rabbitmq_management_agent
+  - rabbitmq_prometheus
+  - rabbitmq_shovel
+  - rabbitmq_shovel_management
+  - rabbitmq_federation
+  - rabbitmq_federation_management
+
+# Resource Limits (slightly higher for staging)
+rabbitmq_vm_memory_high_watermark: 0.65
+rabbitmq_disk_free_limit: "5GB"
+rabbitmq_channel_max: 2047
+
+# Networking
+rabbitmq_listeners:
+  - port: 5672
+    ip: "::"
+rabbitmq_management_listener:
+  port: 15672
+  ip: "::"
+  ssl: false
+rabbitmq_prometheus_port: 15692
+
+# Logging
+rabbitmq_log_level: info
+
+# Queue Configuration
+rabbitmq_default_queue_type: quorum
+
+# Policies
+rabbitmq_policies:
+  - name: ha-all
+    pattern: "^(?!amq\\.).*"
+    vhost: /
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+    priority: 0
+    apply_to: queues
+
+# System Limits
+system_ulimits:
+  nofile:
+    soft: 65536
+    hard: 65536
+  nproc:
+    soft: 65536
+    hard: 65536
+
+system_sysctl:
+  net.core.somaxconn: 4096
+  net.ipv4.tcp_max_syn_backlog: 4096
+  net.ipv4.tcp_fin_timeout: 30
+  vm.swappiness: 1
+
+# Monitoring
+monitoring:
+  prometheus_enabled: true
+  prometheus_port: 15692
+  node_exporter_enabled: true
+  node_exporter_port: 9100

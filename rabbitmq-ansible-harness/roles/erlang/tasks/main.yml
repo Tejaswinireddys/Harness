@@ -1,0 +1,120 @@
+# Erlang Role - Install Erlang OTP on RHEL 8
+# Installs the required Erlang version for RabbitMQ 4.x
+---
+- name: Display Erlang role banner
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      ERLANG ROLE - Runtime Installation (RHEL 8)
+      Node: {{ inventory_hostname }}
+      Target Version: {{ erlang_version }}
+      ════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+# CHECK EXISTING INSTALLATION
+# ═══════════════════════════════════════════════════════════
+- name: Check if Erlang is already installed
+  ansible.builtin.command: erl -eval 'erlang:display(erlang:system_info(otp_release)), halt().' -noshell
+  register: erlang_check
+  changed_when: false
+  failed_when: false
+
+- name: Display current Erlang version
+  ansible.builtin.debug:
+    msg: "Current Erlang: {{ erlang_check.stdout | default('Not installed') }}"
+  when: erlang_check.rc == 0
+
+# ═══════════════════════════════════════════════════════════
+# RHEL 8 - ADD RABBITMQ ERLANG REPOSITORY
+# ═══════════════════════════════════════════════════════════
+- name: Import RabbitMQ Erlang signing key
+  ansible.builtin.rpm_key:
+    key: https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc
+    state: present
+
+- name: Import Cloudsmith/Packagecloud signing key
+  ansible.builtin.rpm_key:
+    key: https://packagecloud.io/rabbitmq/erlang/gpgkey
+    state: present
+
+- name: Add RabbitMQ Erlang repository for RHEL 8
+  ansible.builtin.yum_repository:
+    name: rabbitmq-erlang
+    description: RabbitMQ Erlang Repository for RHEL 8
+    baseurl: https://packagecloud.io/rabbitmq/erlang/el/8/$basearch
+    gpgcheck: yes
+    gpgkey: https://packagecloud.io/rabbitmq/erlang/gpgkey
+    repo_gpgcheck: no
+    enabled: yes
+    sslverify: yes
+    sslcacert: /etc/pki/tls/certs/ca-bundle.crt
+    metadata_expire: 300
+
+- name: Clean DNF cache
+  ansible.builtin.command: dnf clean all
+  changed_when: false
+
+- name: Rebuild DNF cache
+  ansible.builtin.command: dnf makecache
+  changed_when: false
+
+# ═══════════════════════════════════════════════════════════
+# INSTALL ERLANG ON RHEL 8
+# ═══════════════════════════════════════════════════════════
+- name: Install Erlang packages (RHEL 8)
+  ansible.builtin.dnf:
+    name:
+      - erlang
+    state: present
+    enablerepo: rabbitmq-erlang
+  register: erlang_install
+
+- name: Display Erlang installation result
+  ansible.builtin.debug:
+    msg: "Erlang installation: {{ 'Installed' if erlang_install.changed else 'Already installed' }}"
+
+# ═══════════════════════════════════════════════════════════
+# VERIFICATION
+# ═══════════════════════════════════════════════════════════
+- name: Verify Erlang installation
+  ansible.builtin.command: erl -eval 'erlang:display(erlang:system_info(otp_release)), halt().' -noshell
+  register: erlang_version_check
+  changed_when: false
+
+- name: Get detailed Erlang version
+  ansible.builtin.command: erl -eval 'io:format("~s~n", [erlang:system_info(system_version)]), halt().' -noshell
+  register: erlang_full_version
+  changed_when: false
+
+- name: Display installed Erlang version
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      ✅ ERLANG INSTALLATION COMPLETED
+      OTP Release: {{ erlang_version_check.stdout }}
+      Full Version: {{ erlang_full_version.stdout }}
+      ════════════════════════════════════════════════════════
+
+- name: Verify Erlang crypto application
+  ansible.builtin.command: erl -eval 'application:ensure_all_started(crypto), erlang:display(ok), halt().' -noshell
+  register: erlang_crypto_check
+  changed_when: false
+
+- name: Assert Erlang crypto is working
+  ansible.builtin.assert:
+    that:
+      - erlang_crypto_check.rc == 0
+    fail_msg: "❌ Erlang crypto application failed to start"
+    success_msg: "✅ Erlang crypto application is functional"
+
+- name: Verify Erlang SSL application
+  ansible.builtin.command: erl -eval 'application:ensure_all_started(ssl), erlang:display(ok), halt().' -noshell
+  register: erlang_ssl_check
+  changed_when: false
+
+- name: Assert Erlang SSL is working
+  ansible.builtin.assert:
+    that:
+      - erlang_ssl_check.rc == 0
+    fail_msg: "❌ Erlang SSL application failed to start"
+    success_msg: "✅ Erlang SSL application is functional"

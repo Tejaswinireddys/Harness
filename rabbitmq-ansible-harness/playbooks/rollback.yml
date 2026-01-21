@@ -1,0 +1,275 @@
+# Rollback Playbook - RabbitMQ 4.x Cluster
+# This playbook performs rollback to previous version
+# Author: Infrastructure Architecture Team
+# Version: 1.0
+---
+- name: Rollback RabbitMQ Cluster Deployment
+  hosts: rabbitmq_cluster
+  become: yes
+  gather_facts: yes
+  serial: 1  # Process one node at a time for safety
+  max_fail_percentage: 0  # Stop on first failure
+  
+  vars:
+    rollback_version: "{{ previous_version | default('4.0.2') }}"
+    rollback_timestamp: "{{ ansible_date_time.iso8601 }}"
+    backup_dir: "/var/backups/rabbitmq"
+    
+  pre_tasks:
+    - name: Display rollback banner
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          ⚠️  ROLLBACK INITIATED                           ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Target Node     : {{ inventory_hostname }}
+          ║  Rollback Version: {{ rollback_version }}
+          ║  Timestamp       : {{ rollback_timestamp }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+    - name: Get current RabbitMQ version
+      ansible.builtin.command: rabbitmqctl version
+      register: current_version
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display current version
+      ansible.builtin.debug:
+        msg: "Current RabbitMQ version: {{ current_version.stdout | default('Unknown') }}"
+
+    - name: Confirm rollback is needed
+      ansible.builtin.assert:
+        that:
+          - rollback_version is defined
+          - rollback_version | length > 0
+        fail_msg: "❌ Rollback version must be specified"
+        success_msg: "✅ Rollback version confirmed: {{ rollback_version }}"
+
+  tasks:
+    # ═══════════════════════════════════════════════════════════
+    # PRE-ROLLBACK BACKUP
+    # ═══════════════════════════════════════════════════════════
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0755'
+
+    - name: Export current definitions
+      ansible.builtin.command: >
+        rabbitmqctl export_definitions
+        {{ backup_dir }}/definitions-pre-rollback-{{ ansible_date_time.epoch }}.json
+      register: export_result
+      ignore_errors: yes
+
+    - name: Backup current data directory
+      ansible.builtin.archive:
+        path: /var/lib/rabbitmq/mnesia
+        dest: "{{ backup_dir }}/mnesia-backup-{{ ansible_date_time.epoch }}.tar.gz"
+        format: gz
+      register: backup_result
+      ignore_errors: yes
+
+    - name: Display backup status
+      ansible.builtin.debug:
+        msg: |
+          Backup Status:
+            Definitions: {{ 'Success' if export_result.rc == 0 else 'Skipped/Failed' }}
+            Mnesia Data: {{ 'Success' if backup_result is success else 'Skipped/Failed' }}
+
+    # ═══════════════════════════════════════════════════════════
+    # STOP RABBITMQ
+    # ═══════════════════════════════════════════════════════════
+    - name: Stop RabbitMQ application
+      ansible.builtin.command: rabbitmqctl stop_app
+      register: stop_app_result
+      ignore_errors: yes
+
+    - name: Stop RabbitMQ service
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: stopped
+      register: stop_service_result
+
+    - name: Wait for service to stop
+      ansible.builtin.wait_for:
+        port: 5672
+        host: "{{ ansible_host }}"
+        state: stopped
+        timeout: 60
+      ignore_errors: yes
+
+    # ═══════════════════════════════════════════════════════════
+    # DOWNGRADE PACKAGE
+    # ═══════════════════════════════════════════════════════════
+    - name: Downgrade RabbitMQ package (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: "rabbitmq-server={{ rollback_version }}*"
+        state: present
+        force: yes
+        allow_downgrade: yes
+      when: ansible_os_family == 'Debian'
+      register: downgrade_result_debian
+
+    - name: Downgrade RabbitMQ package (RHEL/CentOS)
+      ansible.builtin.dnf:
+        name: "rabbitmq-server-{{ rollback_version }}"
+        state: present
+        allow_downgrade: yes
+      when: ansible_os_family == 'RedHat'
+      register: downgrade_result_rhel
+
+    # ═══════════════════════════════════════════════════════════
+    # RESTORE CONFIGURATION
+    # ═══════════════════════════════════════════════════════════
+    - name: Verify Erlang cookie exists
+      ansible.builtin.stat:
+        path: /var/lib/rabbitmq/.erlang.cookie
+      register: cookie_stat
+
+    - name: Restore Erlang cookie if missing
+      ansible.builtin.copy:
+        content: "{{ erlang_cookie }}"
+        dest: /var/lib/rabbitmq/.erlang.cookie
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0400'
+      when: not cookie_stat.stat.exists or erlang_cookie is defined
+
+    # ═══════════════════════════════════════════════════════════
+    # START RABBITMQ
+    # ═══════════════════════════════════════════════════════════
+    - name: Start RabbitMQ service
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: started
+        enabled: yes
+      register: start_result
+
+    - name: Wait for RabbitMQ to be ready
+      ansible.builtin.wait_for:
+        port: 5672
+        host: "{{ ansible_host }}"
+        delay: 10
+        timeout: 120
+
+    - name: Wait for management UI
+      ansible.builtin.wait_for:
+        port: 15672
+        host: "{{ ansible_host }}"
+        delay: 5
+        timeout: 60
+
+    # ═══════════════════════════════════════════════════════════
+    # REJOIN CLUSTER (for non-primary nodes)
+    # ═══════════════════════════════════════════════════════════
+    - name: Check cluster status
+      ansible.builtin.command: rabbitmqctl cluster_status
+      register: cluster_check
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Rejoin cluster if needed
+      block:
+        - name: Stop app for cluster rejoin
+          ansible.builtin.command: rabbitmqctl stop_app
+          
+        - name: Reset node
+          ansible.builtin.command: rabbitmqctl reset
+          
+        - name: Join cluster
+          ansible.builtin.command: "rabbitmqctl join_cluster rabbit@{{ rabbitmq_primary_node }}"
+          
+        - name: Start app
+          ansible.builtin.command: rabbitmqctl start_app
+      when:
+        - not rabbitmq_is_primary | default(false)
+        - "'rabbit@' + rabbitmq_primary_node not in cluster_check.stdout"
+      rescue:
+        - name: Cluster rejoin failed
+          ansible.builtin.debug:
+            msg: "⚠️ Failed to rejoin cluster. Manual intervention may be required."
+
+    # ═══════════════════════════════════════════════════════════
+    # VERIFY ROLLBACK
+    # ═══════════════════════════════════════════════════════════
+    - name: Get new RabbitMQ version
+      ansible.builtin.command: rabbitmqctl version
+      register: new_version
+      changed_when: false
+
+    - name: Verify rollback was successful
+      ansible.builtin.assert:
+        that:
+          - rollback_version in new_version.stdout
+        fail_msg: |
+          ❌ Rollback verification failed!
+             Expected: {{ rollback_version }}
+             Actual: {{ new_version.stdout }}
+        success_msg: "✅ Rollback successful: {{ new_version.stdout }}"
+
+    - name: Verify node is healthy
+      ansible.builtin.command: rabbitmqctl node_health_check
+      register: health_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display health check result
+      ansible.builtin.debug:
+        msg: |
+          Node Health Check:
+          {{ health_check.stdout | default('Unable to determine') }}
+
+  post_tasks:
+    - name: Rollback summary for this node
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          ✅ ROLLBACK COMPLETED FOR {{ inventory_hostname }}
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Previous Version : {{ current_version.stdout | default('Unknown') }}
+          ║  Current Version  : {{ new_version.stdout }}
+          ║  Service Status   : {{ 'Running' if start_result is success else 'Check Required' }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+# ═══════════════════════════════════════════════════════════
+# FINAL CLUSTER VERIFICATION (runs once after all nodes)
+# ═══════════════════════════════════════════════════════════
+- name: Final Cluster Verification
+  hosts: "{{ rabbitmq_primary_node }}"
+  become: yes
+  gather_facts: no
+  
+  tasks:
+    - name: Wait for cluster to stabilize
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Get final cluster status
+      ansible.builtin.command: rabbitmqctl cluster_status
+      register: final_cluster_status
+      changed_when: false
+
+    - name: Display final cluster status
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          FINAL CLUSTER STATUS AFTER ROLLBACK              ║
+          ╠═══════════════════════════════════════════════════════════╣
+          {{ final_cluster_status.stdout | indent(10) }}
+          ╚═══════════════════════════════════════════════════════════╝
+
+    - name: Rollback complete notification
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          ⚠️  ROLLBACK PROCESS COMPLETE                    ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  ACTION REQUIRED:                                         ║
+          ║  1. Verify cluster is healthy                             ║
+          ║  2. Test application connectivity                         ║
+          ║  3. Update incident ticket                                ║
+          ║  4. Schedule post-mortem                                  ║
+          ╚═══════════════════════════════════════════════════════════╝

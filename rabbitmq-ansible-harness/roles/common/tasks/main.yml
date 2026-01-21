@@ -1,0 +1,321 @@
+# Common Role - RHEL 8 System Preparation
+# Prepares RHEL 8 VMs for RabbitMQ installation
+---
+- name: Display common role banner
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      COMMON ROLE - RHEL 8 System Preparation
+      Node: {{ inventory_hostname }}
+      OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+      ════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+# RHEL 8 SUBSCRIPTION & REPOSITORIES
+# ═══════════════════════════════════════════════════════════
+- name: Check RHEL subscription status
+  ansible.builtin.command: subscription-manager status
+  register: subscription_status
+  changed_when: false
+  failed_when: false
+
+- name: Display subscription status
+  ansible.builtin.debug:
+    msg: "Subscription Status: {{ 'Active' if subscription_status.rc == 0 else 'Not registered or expired' }}"
+
+- name: Enable required RHEL 8 repositories
+  community.general.rhsm_repository:
+    name:
+      - rhel-8-for-x86_64-baseos-rpms
+      - rhel-8-for-x86_64-appstream-rpms
+    state: enabled
+  when: subscription_status.rc == 0
+  ignore_errors: yes
+
+- name: Enable CodeReady Builder repository (for additional packages)
+  community.general.rhsm_repository:
+    name: codeready-builder-for-rhel-8-x86_64-rpms
+    state: enabled
+  when: subscription_status.rc == 0
+  ignore_errors: yes
+
+# ═══════════════════════════════════════════════════════════
+# EPEL REPOSITORY (for additional tools)
+# ═══════════════════════════════════════════════════════════
+- name: Install EPEL repository
+  ansible.builtin.dnf:
+    name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+    state: present
+    disable_gpg_check: yes
+  ignore_errors: yes
+
+# ═══════════════════════════════════════════════════════════
+# PACKAGE MANAGEMENT - RHEL 8 DNF
+# ═══════════════════════════════════════════════════════════
+- name: Update DNF cache
+  ansible.builtin.dnf:
+    update_cache: yes
+
+- name: Install common packages (RHEL 8)
+  ansible.builtin.dnf:
+    name:
+      - curl
+      - wget
+      - vim
+      - htop
+      - net-tools
+      - gnupg2
+      - ca-certificates
+      - python3
+      - python3-pip
+      - python3-setuptools
+      - lsof
+      - socat
+      - logrotate
+      - jq
+      - bind-utils
+      - policycoreutils-python-utils
+      - setools-console
+      - tar
+      - gzip
+      - unzip
+      - nc
+      - telnet
+      - tcpdump
+      - iotop
+      - sysstat
+    state: present
+
+- name: Install Python pika library (for smoke tests)
+  ansible.builtin.pip:
+    name: pika
+    state: present
+  ignore_errors: yes
+
+# ═══════════════════════════════════════════════════════════
+# HOSTNAME CONFIGURATION
+# ═══════════════════════════════════════════════════════════
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Configure /etc/hosts for cluster communication
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+    state: present
+    create: yes
+  loop: "{{ groups['rabbitmq_cluster'] }}"
+
+- name: Verify hostname resolution for all cluster nodes
+  ansible.builtin.command: "getent hosts {{ item }}"
+  loop: "{{ groups['rabbitmq_cluster'] }}"
+  changed_when: false
+  register: hostname_check
+
+# ═══════════════════════════════════════════════════════════
+# SELINUX CONFIGURATION (RHEL 8)
+# ═══════════════════════════════════════════════════════════
+- name: Get SELinux status
+  ansible.builtin.command: getenforce
+  register: selinux_status
+  changed_when: false
+
+- name: Display SELinux status
+  ansible.builtin.debug:
+    msg: "SELinux Status: {{ selinux_status.stdout }}"
+
+- name: Configure SELinux for RabbitMQ (if enforcing)
+  block:
+    - name: Allow RabbitMQ to use required ports
+      community.general.seport:
+        ports: "{{ item.port }}"
+        proto: tcp
+        setype: amqp_port_t
+        state: present
+      loop:
+        - { port: 5672 }
+        - { port: 5671 }
+        - { port: 15672 }
+        - { port: 25672 }
+        - { port: 15692 }
+        - { port: 4369 }
+      ignore_errors: yes
+
+    - name: Set SELinux boolean for RabbitMQ networking
+      ansible.posix.seboolean:
+        name: "{{ item }}"
+        state: yes
+        persistent: yes
+      loop:
+        - nis_enabled
+      ignore_errors: yes
+  when: selinux_status.stdout == 'Enforcing'
+
+# ═══════════════════════════════════════════════════════════
+# SYSTEM LIMITS (RHEL 8)
+# ═══════════════════════════════════════════════════════════
+- name: Configure system limits for RabbitMQ
+  ansible.builtin.template:
+    src: limits.conf.j2
+    dest: /etc/security/limits.d/99-rabbitmq.conf
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure systemd default limits
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system.conf
+    regexp: '^#?DefaultLimitNOFILE='
+    line: 'DefaultLimitNOFILE=65536'
+    state: present
+  notify: reload systemd
+
+# ═══════════════════════════════════════════════════════════
+# SYSCTL CONFIGURATION (RHEL 8)
+# ═══════════════════════════════════════════════════════════
+- name: Configure sysctl parameters for RabbitMQ
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: yes
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-rabbitmq.conf
+  loop: "{{ system_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# ═══════════════════════════════════════════════════════════
+# FIREWALLD CONFIGURATION (RHEL 8)
+# ═══════════════════════════════════════════════════════════
+- name: Check if firewalld is running
+  ansible.builtin.systemd:
+    name: firewalld
+  register: firewalld_status
+  ignore_errors: yes
+
+- name: Configure firewall ports for RabbitMQ
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - 4369/tcp    # EPMD (Erlang Port Mapper Daemon)
+    - 5672/tcp    # AMQP 0-9-1 and 1.0 clients
+    - 5671/tcp    # AMQP 0-9-1 and 1.0 clients (TLS)
+    - 15672/tcp   # Management UI and HTTP API
+    - 25672/tcp   # Erlang distribution (inter-node and CLI)
+    - 15692/tcp   # Prometheus metrics
+    - 35672-35682/tcp  # CLI tools (dynamic range)
+  when: firewalld_status.status.ActiveState == 'active'
+
+- name: Add RabbitMQ cluster nodes to trusted zone
+  ansible.posix.firewalld:
+    source: "{{ hostvars[item]['ansible_host'] }}"
+    zone: trusted
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop: "{{ groups['rabbitmq_cluster'] }}"
+  when: firewalld_status.status.ActiveState == 'active'
+
+# ═══════════════════════════════════════════════════════════
+# TIME SYNCHRONIZATION (RHEL 8 - chronyd)
+# ═══════════════════════════════════════════════════════════
+- name: Ensure chronyd is installed
+  ansible.builtin.dnf:
+    name: chrony
+    state: present
+
+- name: Enable and start chronyd
+  ansible.builtin.systemd:
+    name: chronyd
+    state: started
+    enabled: yes
+
+- name: Verify time synchronization
+  ansible.builtin.command: chronyc tracking
+  register: chrony_status
+  changed_when: false
+
+- name: Display time sync status
+  ansible.builtin.debug:
+    msg: "Time sync status: {{ 'Synchronized' if 'Leap status     : Normal' in chrony_status.stdout else 'Check chrony' }}"
+
+# ═══════════════════════════════════════════════════════════
+# DIRECTORY SETUP
+# ═══════════════════════════════════════════════════════════
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /var/log/rabbitmq
+    - /var/backups/rabbitmq
+    - /etc/rabbitmq
+    - /var/lib/rabbitmq
+
+# ═══════════════════════════════════════════════════════════
+# DISABLE SWAP (recommended for RabbitMQ)
+# ═══════════════════════════════════════════════════════════
+- name: Check current swap status
+  ansible.builtin.command: swapon --show
+  register: swap_status
+  changed_when: false
+  failed_when: false
+
+- name: Disable swap if enabled
+  ansible.builtin.command: swapoff -a
+  when: swap_status.stdout | length > 0
+  changed_when: true
+
+- name: Comment out swap entries in fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+.*)$'
+    replace: '# \1 # Disabled for RabbitMQ'
+  ignore_errors: yes
+
+# ═══════════════════════════════════════════════════════════
+# TUNED PROFILE (RHEL 8 Performance Tuning)
+# ═══════════════════════════════════════════════════════════
+- name: Install tuned
+  ansible.builtin.dnf:
+    name: tuned
+    state: present
+
+- name: Enable and start tuned
+  ansible.builtin.systemd:
+    name: tuned
+    state: started
+    enabled: yes
+
+- name: Set throughput-performance profile
+  ansible.builtin.command: tuned-adm profile throughput-performance
+  changed_when: false
+
+- name: Verify tuned profile
+  ansible.builtin.command: tuned-adm active
+  register: tuned_profile
+  changed_when: false
+
+- name: Display tuned profile
+  ansible.builtin.debug:
+    msg: "Active tuned profile: {{ tuned_profile.stdout }}"
+
+- name: Common role completed
+  ansible.builtin.debug:
+    msg: "✅ Common role completed on {{ inventory_hostname }} (RHEL 8)"
+
+# ═══════════════════════════════════════════════════════════
+# HANDLERS
+# ═══════════════════════════════════════════════════════════
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes

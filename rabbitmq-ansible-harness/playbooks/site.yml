@@ -1,0 +1,200 @@
+# Main Playbook - RabbitMQ 4.x Cluster Deployment
+# This playbook orchestrates the complete cluster deployment
+# Author: Infrastructure Architecture Team
+# Version: 1.0
+---
+- name: RabbitMQ 4.x Cluster Deployment
+  hosts: rabbitmq_cluster
+  become: yes
+  gather_facts: yes
+  any_errors_fatal: true
+  
+  vars:
+    deployment_timestamp: "{{ ansible_date_time.iso8601 }}"
+    deployment_id: "{{ lookup('pipe', 'uuidgen') | default(ansible_date_time.epoch) }}"
+    
+  pre_tasks:
+    # ═══════════════════════════════════════════════════════════
+    # PRE-DEPLOYMENT VALIDATION
+    # ═══════════════════════════════════════════════════════════
+    - name: "═══════════════════════════════════════════════════════════"
+      ansible.builtin.debug:
+        msg: ""
+      run_once: true
+      
+    - name: Display deployment banner
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║          RABBITMQ 4.x CLUSTER DEPLOYMENT                  ║
+          ║                  Powered by Harness CD                    ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Environment   : {{ environment_name | default('unknown') | upper }}
+          ║  Cluster Name  : {{ rabbitmq_cluster_name }}
+          ║  RabbitMQ      : {{ rabbitmq_version }}
+          ║  Erlang        : {{ erlang_version }}
+          ║  Deployment ID : {{ deployment_id[:8] }}...
+          ║  Timestamp     : {{ deployment_timestamp }}
+          ║  Target Nodes  : {{ groups['rabbitmq_cluster'] | length }}
+          ╚═══════════════════════════════════════════════════════════╝
+      run_once: true
+
+    - name: Display target nodes
+      ansible.builtin.debug:
+        msg: "  → {{ item }} ({{ hostvars[item]['ansible_host'] }})"
+      loop: "{{ groups['rabbitmq_cluster'] }}"
+      run_once: true
+
+    - name: Validate minimum node count for quorum
+      ansible.builtin.assert:
+        that:
+          - groups['rabbitmq_cluster'] | length >= 3
+        fail_msg: |
+          ❌ VALIDATION FAILED: Cluster requires minimum 3 nodes for quorum queues.
+             Current node count: {{ groups['rabbitmq_cluster'] | length }}
+        success_msg: "✅ Node count validation passed ({{ groups['rabbitmq_cluster'] | length }} nodes)"
+      run_once: true
+
+    - name: Validate Erlang cookie is set
+      ansible.builtin.assert:
+        that:
+          - erlang_cookie is defined
+          - erlang_cookie | length > 10
+        fail_msg: |
+          ❌ VALIDATION FAILED: Erlang cookie must be set and at least 10 characters.
+             Set via ERLANG_COOKIE environment variable.
+        success_msg: "✅ Erlang cookie validation passed"
+      run_once: true
+
+    - name: Verify SSH connectivity to all nodes
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Verify network connectivity between nodes
+      ansible.builtin.command: "ping -c 2 -W 2 {{ hostvars[item]['ansible_host'] }}"
+      loop: "{{ groups['rabbitmq_cluster'] }}"
+      register: ping_results
+      changed_when: false
+      failed_when: false
+
+    - name: Assert network connectivity
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: "❌ Cannot reach {{ item.item }} from {{ inventory_hostname }}"
+        success_msg: "✅ Network connectivity verified to {{ item.item }}"
+      loop: "{{ ping_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Check for sufficient disk space
+      ansible.builtin.shell: |
+        df -BG / | tail -1 | awk '{print $4}' | sed 's/G//'
+      register: disk_space
+      changed_when: false
+
+    - name: Assert minimum disk space (50GB)
+      ansible.builtin.assert:
+        that:
+          - disk_space.stdout | int >= 50
+        fail_msg: "❌ Insufficient disk space on {{ inventory_hostname }}: {{ disk_space.stdout }}GB available (minimum 50GB required)"
+        success_msg: "✅ Disk space check passed: {{ disk_space.stdout }}GB available"
+
+    - name: Check for sufficient memory
+      ansible.builtin.shell: |
+        free -g | awk '/^Mem:/{print $2}'
+      register: memory_gb
+      changed_when: false
+
+    - name: Assert minimum memory (4GB)
+      ansible.builtin.assert:
+        that:
+          - memory_gb.stdout | int >= 4
+        fail_msg: "❌ Insufficient memory on {{ inventory_hostname }}: {{ memory_gb.stdout }}GB available (minimum 4GB required)"
+        success_msg: "✅ Memory check passed: {{ memory_gb.stdout }}GB available"
+
+    - name: Pre-flight checks completed
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║         ✅ PRE-FLIGHT CHECKS COMPLETED                    ║
+          ╚═══════════════════════════════════════════════════════════╝
+      run_once: true
+
+  # ═══════════════════════════════════════════════════════════
+  # ROLE EXECUTION
+  # ═══════════════════════════════════════════════════════════
+  roles:
+    - role: common
+      tags: [common, always]
+      
+    - role: erlang
+      tags: [erlang, runtime]
+      
+    - role: rabbitmq
+      tags: [rabbitmq, application]
+      
+    - role: monitoring
+      tags: [monitoring, observability]
+      when: monitoring.prometheus_enabled | default(true)
+
+  # ═══════════════════════════════════════════════════════════
+  # POST-DEPLOYMENT TASKS
+  # ═══════════════════════════════════════════════════════════
+  post_tasks:
+    - name: Get final cluster status
+      ansible.builtin.command: rabbitmqctl cluster_status
+      register: final_cluster_status
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ rabbitmq_primary_node }}"
+
+    - name: Get RabbitMQ version
+      ansible.builtin.command: rabbitmqctl version
+      register: rabbitmq_installed_version
+      changed_when: false
+
+    - name: Deployment completion summary
+      ansible.builtin.debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║         ✅ DEPLOYMENT COMPLETED SUCCESSFULLY              ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  CLUSTER INFORMATION                                      ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Cluster Name    : {{ rabbitmq_cluster_name }}
+          ║  RabbitMQ Version: {{ rabbitmq_installed_version.stdout }}
+          ║  Node Count      : {{ groups['rabbitmq_cluster'] | length }}
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  ACCESS ENDPOINTS                                         ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Management UI   : http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:15672
+          ║  AMQP Endpoint   : amqp://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:5672
+          ║  Prometheus      : http://{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}:{{ rabbitmq_prometheus_port | default(15692) }}/metrics
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  CREDENTIALS                                              ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Admin User      : {{ rabbitmq_admin_user }}
+          ║  Admin Password  : ******* (stored in Harness Secrets)
+          ╚═══════════════════════════════════════════════════════════╝
+      run_once: true
+
+    - name: Save deployment metadata
+      ansible.builtin.copy:
+        content: |
+          ---
+          deployment_id: {{ deployment_id }}
+          timestamp: {{ deployment_timestamp }}
+          environment: {{ environment_name }}
+          rabbitmq_version: {{ rabbitmq_installed_version.stdout }}
+          cluster_name: {{ rabbitmq_cluster_name }}
+          nodes:
+          {% for node in groups['rabbitmq_cluster'] %}
+            - name: {{ node }}
+              ip: {{ hostvars[node]['ansible_host'] }}
+              primary: {{ hostvars[node]['rabbitmq_is_primary'] | default(false) }}
+          {% endfor %}
+        dest: /var/lib/rabbitmq/deployment_metadata.yml
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0644'

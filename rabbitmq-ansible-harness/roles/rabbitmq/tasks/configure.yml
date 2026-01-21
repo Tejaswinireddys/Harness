@@ -1,0 +1,86 @@
+# RabbitMQ Configuration Tasks
+---
+- name: "CONFIGURE: Deploy RabbitMQ main configuration"
+  ansible.builtin.template:
+    src: rabbitmq.conf.j2
+    dest: /etc/rabbitmq/rabbitmq.conf
+    owner: rabbitmq
+    group: rabbitmq
+    mode: '0644'
+    backup: yes
+  notify: restart rabbitmq
+
+- name: "CONFIGURE: Deploy advanced configuration"
+  ansible.builtin.template:
+    src: advanced.config.j2
+    dest: /etc/rabbitmq/advanced.config
+    owner: rabbitmq
+    group: rabbitmq
+    mode: '0644'
+    backup: yes
+  notify: restart rabbitmq
+
+- name: "CONFIGURE: Deploy environment configuration"
+  ansible.builtin.template:
+    src: rabbitmq-env.conf.j2
+    dest: /etc/rabbitmq/rabbitmq-env.conf
+    owner: rabbitmq
+    group: rabbitmq
+    mode: '0644'
+    backup: yes
+  notify: restart rabbitmq
+
+- name: "CONFIGURE: Deploy enabled_plugins file"
+  ansible.builtin.template:
+    src: enabled_plugins.j2
+    dest: /etc/rabbitmq/enabled_plugins
+    owner: rabbitmq
+    group: rabbitmq
+    mode: '0644'
+    backup: yes
+  notify: restart rabbitmq
+
+- name: "CONFIGURE: Configure systemd service limits"
+  ansible.builtin.template:
+    src: rabbitmq-server.service.override.j2
+    dest: /etc/systemd/system/rabbitmq-server.service.d/limits.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart rabbitmq
+
+- name: "CONFIGURE: Reload systemd daemon"
+  ansible.builtin.systemd:
+    daemon_reload: yes
+
+- name: "CONFIGURE: Start RabbitMQ service"
+  ansible.builtin.systemd:
+    name: rabbitmq-server
+    state: started
+    enabled: yes
+
+- name: "CONFIGURE: Wait for RabbitMQ to be ready"
+  ansible.builtin.wait_for:
+    port: 5672
+    host: "{{ ansible_host }}"
+    delay: 5
+    timeout: 120
+
+- name: "CONFIGURE: Wait for management port"
+  ansible.builtin.wait_for:
+    port: 15672
+    host: "{{ ansible_host }}"
+    delay: 5
+    timeout: 120
+
+- name: "CONFIGURE: Verify RabbitMQ is responding"
+  ansible.builtin.command: rabbitmqctl status
+  register: rabbitmq_status
+  changed_when: false
+  retries: 5
+  delay: 10
+  until: rabbitmq_status.rc == 0
+
+- name: "CONFIGURE: Display configuration status"
+  ansible.builtin.debug:
+    msg: "✅ RabbitMQ configured and running on {{ inventory_hostname }}"

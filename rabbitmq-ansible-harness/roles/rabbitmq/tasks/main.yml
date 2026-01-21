@@ -1,0 +1,41 @@
+# RabbitMQ Role - Main Entry Point
+# Orchestrates the RabbitMQ installation, configuration, and clustering
+---
+- name: Display RabbitMQ role banner
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      RABBITMQ ROLE - Application Installation
+      Node: {{ inventory_hostname }}
+      Version: {{ rabbitmq_version }}
+      Primary: {{ rabbitmq_is_primary | default(false) }}
+      ════════════════════════════════════════════════════════
+
+# Include sub-tasks
+- name: Include installation tasks
+  ansible.builtin.include_tasks: install.yml
+  tags: [install]
+
+- name: Include configuration tasks
+  ansible.builtin.include_tasks: configure.yml
+  tags: [configure]
+
+- name: Include clustering tasks
+  ansible.builtin.include_tasks: cluster.yml
+  tags: [cluster]
+
+- name: Include user management tasks
+  ansible.builtin.include_tasks: users.yml
+  tags: [users]
+
+- name: Include policy tasks
+  ansible.builtin.include_tasks: policies.yml
+  tags: [policies]
+
+- name: Include exchange and queue tasks
+  ansible.builtin.include_tasks: topology.yml
+  tags: [topology]
+
+- name: RabbitMQ role completed
+  ansible.builtin.debug:
+    msg: "✅ RabbitMQ role completed on {{ inventory_hostname }}"

@@ -1,0 +1,80 @@
+# RabbitMQ Policy Configuration Tasks
+---
+- name: "POLICIES: Configure RabbitMQ policies"
+  ansible.builtin.debug:
+    msg: "Configuring RabbitMQ policies..."
+  run_once: true
+
+# ═══════════════════════════════════════════════════════════
+# POLICIES
+# ═══════════════════════════════════════════════════════════
+- name: "POLICIES: Create RabbitMQ policies"
+  community.rabbitmq.rabbitmq_policy:
+    name: "{{ item.name }}"
+    pattern: "{{ item.pattern }}"
+    vhost: "{{ item.vhost | default('/') }}"
+    tags: "{{ item.definition }}"
+    priority: "{{ item.priority | default(0) }}"
+    apply_to: "{{ item.apply_to | default('queues') }}"
+    state: present
+  loop: "{{ rabbitmq_policies }}"
+  loop_control:
+    label: "{{ item.name }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+# ═══════════════════════════════════════════════════════════
+# OPERATOR POLICIES (for administrative overrides)
+# ═══════════════════════════════════════════════════════════
+- name: "POLICIES: Create operator policies"
+  community.rabbitmq.rabbitmq_policy:
+    name: "{{ item.name }}"
+    pattern: "{{ item.pattern }}"
+    vhost: "{{ item.vhost | default('/') }}"
+    tags: "{{ item.definition }}"
+    priority: "{{ item.priority | default(0) }}"
+    apply_to: "{{ item.apply_to | default('queues') }}"
+    state: present
+  loop: "{{ rabbitmq_operator_policies | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  when: rabbitmq_operator_policies is defined
+
+# ═══════════════════════════════════════════════════════════
+# PARAMETERS (for shovel, federation, etc.)
+# ═══════════════════════════════════════════════════════════
+- name: "POLICIES: Configure parameters"
+  community.rabbitmq.rabbitmq_parameter:
+    component: "{{ item.component }}"
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    vhost: "{{ item.vhost | default('/') }}"
+    state: present
+  loop: "{{ rabbitmq_parameters | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  when: rabbitmq_parameters is defined
+
+# ═══════════════════════════════════════════════════════════
+# VERIFICATION
+# ═══════════════════════════════════════════════════════════
+- name: "POLICIES: List configured policies"
+  ansible.builtin.command: rabbitmqctl list_policies
+  register: policy_list
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "POLICIES: Display configured policies"
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      CONFIGURED POLICIES
+      ════════════════════════════════════════════════════════
+      {{ policy_list.stdout }}
+      ════════════════════════════════════════════════════════
+  run_once: true

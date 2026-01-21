@@ -1,0 +1,133 @@
+# RabbitMQ Clustering Tasks
+---
+- name: "CLUSTER: Get current cluster status"
+  ansible.builtin.command: rabbitmqctl cluster_status
+  register: cluster_status
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "CLUSTER: Display current cluster status"
+  ansible.builtin.debug:
+    msg: "{{ cluster_status.stdout_lines }}"
+  run_once: true
+
+# ═══════════════════════════════════════════════════════════
+# PRIMARY NODE SETUP
+# ═══════════════════════════════════════════════════════════
+- name: "CLUSTER: Ensure primary node is running"
+  ansible.builtin.systemd:
+    name: rabbitmq-server
+    state: started
+  when: rabbitmq_is_primary | default(false)
+
+- name: "CLUSTER: Wait for primary node AMQP port"
+  ansible.builtin.wait_for:
+    port: 5672
+    host: "{{ hostvars[rabbitmq_primary_node]['ansible_host'] }}"
+    timeout: 60
+  run_once: true
+
+# ═══════════════════════════════════════════════════════════
+# SECONDARY NODE CLUSTER JOIN
+# ═══════════════════════════════════════════════════════════
+- name: "CLUSTER: Check if node needs to join cluster"
+  ansible.builtin.shell: |
+    rabbitmqctl cluster_status --formatter json | grep -o '"running_nodes":\[[^]]*\]' | grep -c "{{ rabbitmq_primary_node }}"
+  register: already_in_cluster
+  changed_when: false
+  failed_when: false
+  when: not rabbitmq_is_primary | default(false)
+
+- name: "CLUSTER: Join cluster (secondary nodes)"
+  block:
+    - name: "CLUSTER: Stop RabbitMQ application"
+      ansible.builtin.command: rabbitmqctl stop_app
+      register: stop_app_result
+
+    - name: "CLUSTER: Reset RabbitMQ node"
+      ansible.builtin.command: rabbitmqctl reset
+      register: reset_result
+
+    - name: "CLUSTER: Join cluster"
+      ansible.builtin.command: "rabbitmqctl join_cluster rabbit@{{ rabbitmq_primary_node }}"
+      register: join_result
+
+    - name: "CLUSTER: Start RabbitMQ application"
+      ansible.builtin.command: rabbitmqctl start_app
+      register: start_app_result
+
+    - name: "CLUSTER: Display join result"
+      ansible.builtin.debug:
+        msg: "✅ {{ inventory_hostname }} joined cluster successfully"
+  when:
+    - not rabbitmq_is_primary | default(false)
+    - already_in_cluster.stdout | default('0') == '0'
+  rescue:
+    - name: "CLUSTER: Join failed - attempt recovery"
+      ansible.builtin.debug:
+        msg: "⚠️ Cluster join failed for {{ inventory_hostname }}. Attempting recovery..."
+
+    - name: "CLUSTER: Force reset and retry"
+      ansible.builtin.command: rabbitmqctl force_reset
+      ignore_errors: yes
+
+    - name: "CLUSTER: Retry join cluster"
+      ansible.builtin.command: "rabbitmqctl join_cluster rabbit@{{ rabbitmq_primary_node }}"
+      register: retry_join
+
+    - name: "CLUSTER: Start application after retry"
+      ansible.builtin.command: rabbitmqctl start_app
+
+# ═══════════════════════════════════════════════════════════
+# CLUSTER CONFIGURATION
+# ═══════════════════════════════════════════════════════════
+- name: "CLUSTER: Set cluster name"
+  ansible.builtin.command: "rabbitmqctl set_cluster_name {{ rabbitmq_cluster_name }}"
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+  changed_when: false
+
+# ═══════════════════════════════════════════════════════════
+# VERIFICATION
+# ═══════════════════════════════════════════════════════════
+- name: "CLUSTER: Wait for cluster to stabilize"
+  ansible.builtin.pause:
+    seconds: 10
+  run_once: true
+
+- name: "CLUSTER: Get final cluster status"
+  ansible.builtin.command: rabbitmqctl cluster_status
+  register: final_cluster_status
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "CLUSTER: Display final cluster status"
+  ansible.builtin.debug:
+    msg: |
+      ════════════════════════════════════════════════════════
+      CLUSTER STATUS
+      ════════════════════════════════════════════════════════
+      {{ final_cluster_status.stdout }}
+      ════════════════════════════════════════════════════════
+  run_once: true
+
+- name: "CLUSTER: Verify all nodes joined"
+  ansible.builtin.shell: |
+    rabbitmqctl cluster_status --formatter json | jq '.running_nodes | length'
+  register: running_nodes_count
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ rabbitmq_primary_node }}"
+
+- name: "CLUSTER: Assert all nodes are running"
+  ansible.builtin.assert:
+    that:
+      - running_nodes_count.stdout | int >= groups['rabbitmq_cluster'] | length
+    fail_msg: |
+      ❌ Not all nodes joined the cluster!
+         Expected: {{ groups['rabbitmq_cluster'] | length }}
+         Running: {{ running_nodes_count.stdout }}
+    success_msg: "✅ All {{ running_nodes_count.stdout }} nodes are in the cluster"
+  run_once: true
